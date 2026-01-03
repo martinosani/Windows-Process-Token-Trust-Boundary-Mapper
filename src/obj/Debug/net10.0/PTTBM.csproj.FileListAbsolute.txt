@@ -1,0 +1,14 @@
+C:\Users\user\Desktop\Home\VMs\VMShared\Windows-Internals\PTTBM\PTTBM\bin\Debug\net10.0\PTTBM.exe
+C:\Users\user\Desktop\Home\VMs\VMShared\Windows-Internals\PTTBM\PTTBM\bin\Debug\net10.0\PTTBM.deps.json
+C:\Users\user\Desktop\Home\VMs\VMShared\Windows-Internals\PTTBM\PTTBM\bin\Debug\net10.0\PTTBM.runtimeconfig.json
+C:\Users\user\Desktop\Home\VMs\VMShared\Windows-Internals\PTTBM\PTTBM\bin\Debug\net10.0\PTTBM.dll
+C:\Users\user\Desktop\Home\VMs\VMShared\Windows-Internals\PTTBM\PTTBM\bin\Debug\net10.0\PTTBM.pdb
+C:\Users\user\Desktop\Home\VMs\VMShared\Windows-Internals\PTTBM\PTTBM\obj\Debug\net10.0\PTTBM.GeneratedMSBuildEditorConfig.editorconfig
+C:\Users\user\Desktop\Home\VMs\VMShared\Windows-Internals\PTTBM\PTTBM\obj\Debug\net10.0\PTTBM.AssemblyInfoInputs.cache
+C:\Users\user\Desktop\Home\VMs\VMShared\Windows-Internals\PTTBM\PTTBM\obj\Debug\net10.0\PTTBM.AssemblyInfo.cs
+C:\Users\user\Desktop\Home\VMs\VMShared\Windows-Internals\PTTBM\PTTBM\obj\Debug\net10.0\PTTBM.csproj.CoreCompileInputs.cache
+C:\Users\user\Desktop\Home\VMs\VMShared\Windows-Internals\PTTBM\PTTBM\obj\Debug\net10.0\PTTBM.dll
+C:\Users\user\Desktop\Home\VMs\VMShared\Windows-Internals\PTTBM\PTTBM\obj\Debug\net10.0\refint\PTTBM.dll
+C:\Users\user\Desktop\Home\VMs\VMShared\Windows-Internals\PTTBM\PTTBM\obj\Debug\net10.0\PTTBM.pdb
+C:\Users\user\Desktop\Home\VMs\VMShared\Windows-Internals\PTTBM\PTTBM\obj\Debug\net10.0\PTTBM.genruntimeconfig.cache
+C:\Users\user\Desktop\Home\VMs\VMShared\Windows-Internals\PTTBM\PTTBM\obj\Debug\net10.0\ref\PTTBM.dll
