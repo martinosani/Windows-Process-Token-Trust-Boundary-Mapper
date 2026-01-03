@@ -11,27 +11,28 @@ namespace PTTBM.Collectors.Rules
     ///
     /// High-impact token privileges marker.
     ///
-    /// Purpose:
-    /// - Surface processes whose *effective token* carries privileges that materially expand the attack surface
-    ///   (lateral influence, security boundary weakening, credential theft pathways, privileged resource access).
+    /// Goal:
+    /// - Surface processes whose effective token carries privileges that materially expand impact
+    ///   once code execution or logic control is achieved (memory-safety bug, plugin abuse, IPC misuse,
+    ///   confused-deputy paths, etc.).
     ///
-    /// Design principles:
-    /// - Fact-driven: reports privileges observed on the token.
-    /// - Conservative: excludes low-signal privileges commonly present on most user tokens (e.g., SeChangeNotifyPrivilege).
-    /// - Avoids role claims: does not claim exploitation, only flags high-value review targets.
-    ///
-    /// Notes:
-    /// - Many privileges are only meaningful when *enabled* (or enabled-by-default).
-    /// - Some environments legitimately run with these privileges; this rule is for triage and research guidance.
+    /// Design:
+    /// - Fact-first: privilege presence and privilege state (Enabled / EnabledByDefault / Present / Removed)
+    ///   are derived directly from token attributes.
+    /// - Conservative severity: "Enabled" is the primary driver. "Present-only" is a weaker signal,
+    ///   especially on High/System tokens where many privileges may be present by design.
+    /// - No role claims: does not claim exploitation. It flags review targets and provides investigation guidance.
     /// </summary>
     internal sealed class HighImpactPrivilegesRule : IProcessRule
     {
         public string RuleId => "PTTBM.PRIV.001";
         public string Title => "High-impact token privileges present";
         public FindingCategory Category => FindingCategory.Privileges;
+
+        // Default baseline for a privileges marker; severity is computed per instance.
         public FindingSeverity BaselineSeverity => FindingSeverity.Medium;
 
-        // High impact when present+enabled: historically correlated with powerful primitives.
+        // "Critical" privileges: widely recognized as enabling powerful primitives when enabled.
         private static readonly HashSet<string> CriticalPrivileges = new(StringComparer.OrdinalIgnoreCase)
         {
             "SeDebugPrivilege",
@@ -44,7 +45,7 @@ namespace PTTBM.Collectors.Rules
             "SeSystemEnvironmentPrivilege"
         };
 
-        // Significant privileges: can enable sensitive read/write actions or boundary manipulation.
+        // "Significant" privileges: meaningful security implications; may bypass typical access intent.
         private static readonly HashSet<string> SignificantPrivileges = new(StringComparer.OrdinalIgnoreCase)
         {
             "SeBackupPrivilege",
@@ -62,51 +63,28 @@ namespace PTTBM.Collectors.Rules
                 yield break;
 
             var token = s.Token;
-
-            // If privileges are not observable, we do not emit a finding.
-            // Another rule may handle "visibility boundaries" separately if you want.
             var privs = token.Privileges;
+
+            // If privileges are not observable, this rule does not emit a finding.
             if (privs is null || privs.Count == 0)
                 yield break;
 
-            // Collect high-impact privileges found on the token, with best-effort "enabled" semantics.
-            var matches = new List<PrivMatch>(capacity: 8);
-            foreach (var p in privs)
-            {
-                var name = GetPrivilegeName(p);
-                if (string.IsNullOrWhiteSpace(name))
-                    continue;
-
-                if (!CriticalPrivileges.Contains(name) && !SignificantPrivileges.Contains(name))
-                    continue;
-
-                var state = GetPrivilegeState(p);
-                var tier = CriticalPrivileges.Contains(name) ? PrivTier.Critical : PrivTier.Significant;
-
-                matches.Add(new PrivMatch(name, tier, state));
-            }
-
+            var matches = CollectHighImpactPrivileges(privs);
             if (matches.Count == 0)
                 yield break;
 
-            // Severity is based on:
-            // - privilege tier (critical vs significant)
-            // - whether any critical privilege is enabled (or enabled-by-default)
-            // - whether the process is already high trust (SYSTEM/High IL) or is medium/limited (research interest differs)
-            var severity = ComputeSeverity(token, matches);
+            // Group privileges by state for better readability and more accurate reasoning.
+            var groups = GroupByState(matches);
 
-            // Evidence: compact, stable, useful for diffing.
-            var evidence = BuildEvidence(s, matches);
+            // Severity is driven primarily by enabled state (realistic triage).
+            var severity = ComputeSeverity(token, groups);
 
-            // Recommendation: precise, non-alarmist, focuses on realistic investigation.
-            var recommendation = BuildRecommendation(s, matches);
+            var evidence = BuildEvidence(s, groups);
+            var recommendation = BuildRecommendation(s, groups);
 
-            var tags = new List<string>
-            {
-                "high-impact-privilege"
-            };
+            var tags = new List<string> { "high-impact-privilege" };
 
-            // Keep this rule facts-only: no related PID correlation here.
+            // Facts-only: no correlation in this rule.
             var relatedPids = Array.Empty<int>();
 
             var conceptRefs = new List<string>
@@ -118,15 +96,15 @@ namespace PTTBM.Collectors.Rules
             {
                 new(
                     "Validate necessity",
-                    "Confirm the privilege is required for the process role. If not, reduce privileges (service hardening, token filtering, least privilege) or move the action into a constrained helper."
+                    "Confirm the privilege set is required for the process role. If not, reduce privileges (least privilege, service hardening, token filtering) or isolate privileged operations into a constrained helper."
                 ),
                 new(
-                    "Check enablement paths",
-                    "Determine whether the privilege is enabled by default, enabled dynamically, or only enabled during specific operations. Review the code paths that call AdjustTokenPrivileges and their input validation."
+                    "Determine enablement behavior",
+                    "Identify whether privileges are enabled by default or enabled only during specific operations (AdjustTokenPrivileges). Review those code paths and their input validation/authorization."
                 ),
                 new(
-                    "Assess reachable inputs",
-                    "Identify inputs the process consumes (IPC, files, registry, network, plugins/extensions). High-impact privileges raise the consequence of parsing/validation bugs in these surfaces."
+                    "Intersect with reachable surfaces",
+                    "Map how untrusted inputs reach privileged operations (IPC endpoints, file/registry handoffs, plugins/extensions, network parsers). High-impact privileges amplify the consequences of bugs in those surfaces."
                 )
             };
 
@@ -134,7 +112,7 @@ namespace PTTBM.Collectors.Rules
                 rule: this,
                 snapshot: s,
                 severity: severity,
-                titleSuffix: BuildTitleSuffix(matches),
+                titleSuffix: BuildTitleSuffix(groups),
                 evidence: evidence,
                 recommendation: recommendation,
                 tags: tags,
@@ -145,63 +123,136 @@ namespace PTTBM.Collectors.Rules
         }
 
         // =========================
-        // Severity model (conservative, explainable)
+        // Collection / grouping
         // =========================
 
-        private static FindingSeverity ComputeSeverity(TokenInfo token, List<PrivMatch> matches)
+        private static List<PrivMatch> CollectHighImpactPrivileges(IReadOnlyList<TokenPrivilegeInfo> privs)
         {
-            // Enabled critical privileges are the strongest signal.
-            bool enabledCritical = matches.Any(m => m.Tier == PrivTier.Critical && m.State.IsEnabledByDefault);
+            var matches = new List<PrivMatch>(capacity: 8);
 
-            // Enabled significant privileges are meaningful but less direct than critical ones.
-            bool enabledSignificant = matches.Any(m => m.Tier == PrivTier.Significant && m.State.IsEnabledByDefault);
-
-            // If the token is SYSTEM or High IL, privilege presence may be expected for some components,
-            // but it still expands blast radius. Keep High only when critical privileges are enabled.
-            if (token.IntegrityLevel == IntegrityLevel.System || token.IntegrityLevel == IntegrityLevel.High)
+            foreach (var p in privs)
             {
-                if (enabledCritical) return FindingSeverity.High;
-                if (enabledSignificant) return FindingSeverity.Medium;
+                var name = p.Name;
+                if (string.IsNullOrWhiteSpace(name))
+                    continue;
+
+                if (!CriticalPrivileges.Contains(name) && !SignificantPrivileges.Contains(name))
+                    continue;
+
+                var tier = CriticalPrivileges.Contains(name) ? PrivTier.Critical : PrivTier.Significant;
+
+                var state = new PrivState(
+                    IsEnabled: p.IsEnabled,
+                    IsEnabledByDefault: p.IsEnabledByDefault,
+                    IsRemoved: p.IsRemoved
+                );
+
+                matches.Add(new PrivMatch(name, tier, state));
+            }
+
+            return matches;
+        }
+
+        private static PrivGroups GroupByState(List<PrivMatch> matches)
+        {
+            // Stable ordering: critical first, then significant; within each state, alphabetical.
+            static IEnumerable<PrivMatch> Order(IEnumerable<PrivMatch> xs) =>
+                xs.OrderByDescending(m => m.Tier == PrivTier.Critical)
+                  .ThenBy(m => m.Name, StringComparer.OrdinalIgnoreCase);
+
+            var enabled = Order(matches.Where(m => m.State.IsEnabled)).ToList();
+            var defaultEnabled = Order(matches.Where(m => !m.State.IsEnabled && m.State.IsEnabledByDefault)).ToList();
+            var removed = Order(matches.Where(m => m.State.IsRemoved)).ToList();
+            var presentOnly = Order(matches.Where(m => !m.State.IsEnabled && !m.State.IsEnabledByDefault && !m.State.IsRemoved)).ToList();
+
+            return new PrivGroups(enabled, defaultEnabled, presentOnly, removed, matches);
+        }
+
+        // =========================
+        // Severity model (realistic, conservative)
+        // =========================
+
+        private static FindingSeverity ComputeSeverity(TokenInfo token, PrivGroups g)
+        {
+            bool enabledCritical = g.Enabled.Any(m => m.Tier == PrivTier.Critical);
+            bool enabledSignificant = g.Enabled.Any(m => m.Tier == PrivTier.Significant);
+
+            bool defaultCritical = g.DefaultEnabled.Any(m => m.Tier == PrivTier.Critical);
+            bool defaultSignificant = g.DefaultEnabled.Any(m => m.Tier == PrivTier.Significant);
+
+            bool anyCriticalPresentOnly = g.PresentOnly.Any(m => m.Tier == PrivTier.Critical);
+            bool anySignificantPresentOnly = g.PresentOnly.Any(m => m.Tier == PrivTier.Significant);
+
+            // Enabled is the strongest practical signal (most direct leverage).
+            if (enabledCritical)
+                return FindingSeverity.High;
+
+            // Default-enabled suggests frequent activation; still meaningful.
+            if (defaultCritical)
+                return FindingSeverity.Medium;
+
+            // Enabled significant privileges can be impactful (e.g., Backup/Restore semantics).
+            if (enabledSignificant)
+                return FindingSeverity.Medium;
+
+            // For High/System tokens, many privileges may be present-only by design.
+            // Treat present-only as Low severity, but still a useful marker for research prioritization.
+            if (token.IntegrityLevel == IntegrityLevel.High || token.IntegrityLevel == IntegrityLevel.System)
+            {
+                if (anyCriticalPresentOnly || anySignificantPresentOnly || defaultSignificant)
+                    return FindingSeverity.Low;
+
                 return FindingSeverity.Low;
             }
 
-            // For Medium IL processes, enabled critical privileges are particularly interesting (unexpected in many user apps).
+            // For Medium integrity user processes, present-only critical privileges are uncommon and worth review,
+            // but still weaker than enabled/default-enabled.
             if (token.IntegrityLevel == IntegrityLevel.Medium)
             {
-                if (enabledCritical) return FindingSeverity.High;
-                if (enabledSignificant) return FindingSeverity.Medium;
+                if (anyCriticalPresentOnly)
+                    return FindingSeverity.Medium;
+
+                if (anySignificantPresentOnly || defaultSignificant)
+                    return FindingSeverity.Low;
+
                 return FindingSeverity.Low;
             }
 
-            // For Low IL processes, high-impact privileges should be rare; treat any match as high review priority.
+            // For Low integrity processes, any high-impact privilege is unusual; treat as Medium.
             if (token.IntegrityLevel == IntegrityLevel.Low)
             {
-                return enabledCritical || enabledSignificant ? FindingSeverity.High : FindingSeverity.Medium;
+                if (anyCriticalPresentOnly || anySignificantPresentOnly || defaultSignificant)
+                    return FindingSeverity.Medium;
+
+                return FindingSeverity.Low;
             }
 
-            // Unknown integrity: default to Medium if we found critical, else Low.
-            return matches.Any(m => m.Tier == PrivTier.Critical) ? FindingSeverity.Medium : FindingSeverity.Low;
+            // Unknown integrity: conservative default.
+            if (anyCriticalPresentOnly || defaultCritical || enabledSignificant || defaultSignificant)
+                return FindingSeverity.Medium;
+
+            return FindingSeverity.Low;
         }
 
-        private static string BuildTitleSuffix(List<PrivMatch> matches)
+        private static string BuildTitleSuffix(PrivGroups g)
         {
-            var crit = matches.Count(m => m.Tier == PrivTier.Critical);
-            var sig = matches.Count(m => m.Tier == PrivTier.Significant);
+            int enabled = g.Enabled.Count;
+            int def = g.DefaultEnabled.Count;
+            int present = g.PresentOnly.Count;
 
-            if (crit > 0 && sig > 0) return $"{crit} critical, {sig} significant";
-            if (crit > 0) return $"{crit} critical";
-            return $"{sig} significant";
+            // Keep suffix short and stable.
+            return $"enabled={enabled}, default={def}, present={present}";
         }
 
         // =========================
-        // Evidence / Recommendation
+        // Evidence / recommendation (clear, non-alarmist)
         // =========================
 
-        private static string BuildEvidence(ProcessSnapshot s, List<PrivMatch> matches)
+        private static string BuildEvidence(ProcessSnapshot s, PrivGroups g)
         {
             var t = s.Token;
 
-            var sb = new StringBuilder(512);
+            var sb = new StringBuilder(768);
 
             sb.Append($"IL={t.IntegrityLevel}; ");
             sb.Append($"User={RuleHelpers.Safe(t.UserName)}; ");
@@ -210,89 +261,88 @@ namespace PTTBM.Collectors.Rules
             sb.Append($"AppContainer={RuleHelpers.Safe(t.IsAppContainer?.ToString())}; ");
             sb.Append($"Restricted={RuleHelpers.Safe(t.IsRestricted?.ToString())}; ");
 
-            // Show privilege list in a stable order: critical first, enabled first.
-            var ordered = matches
-                .OrderByDescending(m => m.Tier == PrivTier.Critical)
-                .ThenByDescending(m => m.State.IsEnabledByDefault)
-                .ThenBy(m => m.Name, StringComparer.OrdinalIgnoreCase)
-                .ToList();
+            // Evidence should emphasize enabled/default-enabled, and then summarize the rest.
+            sb.Append("Enabled=[");
+            sb.Append(string.Join(", ", g.Enabled.Select(m => m.Name)));
+            sb.Append("]; ");
 
-            sb.Append("Privs=[");
-            sb.Append(string.Join(", ",
-                ordered.Select(m => $"{m.Name}:{m.State.ShortLabel}")));
-            sb.Append("]");
+            sb.Append("DefaultEnabled=[");
+            sb.Append(string.Join(", ", g.DefaultEnabled.Select(m => m.Name)));
+            sb.Append("]; ");
+
+            sb.Append($"PresentOnlyCount={g.PresentOnly.Count}; ");
+            sb.Append($"RemovedCount={g.Removed.Count}");
 
             return sb.ToString();
         }
 
-        private static string BuildRecommendation(ProcessSnapshot s, List<PrivMatch> matches)
+        private static string BuildRecommendation(ProcessSnapshot s, PrivGroups g)
         {
             var t = s.Token;
-
-            var sb = new StringBuilder(2048);
+            var sb = new StringBuilder(2200);
 
             sb.AppendLine("High-impact privileges were observed on the process token.");
-            sb.AppendLine("Token privileges materially affect what the process can do once code execution is achieved (by a bug, plugin abuse, IPC misuse, or other control-flow capture).");
+            sb.AppendLine("Token privileges define OS capabilities that can materially change the impact of a vulnerability or a logic flaw once control is achieved.");
             sb.AppendLine();
 
-            sb.AppendLine("Why this matters (security semantics):");
-            sb.AppendLine("- Privileges are distinct from group membership and can grant powerful OS capabilities even at Medium integrity.");
-            sb.AppendLine("- If a process exposes reachable inputs (IPC, files, extensions, network parsing), high-impact privileges amplify the impact of any memory-safety or logic bug.");
-            sb.AppendLine("- Some privilege-driven actions bypass typical discretionary access expectations (e.g., backup/restore semantics).");
-            sb.AppendLine();
-
-            sb.AppendLine("Observed privileges (best-effort state):");
-            foreach (var grp in matches
-                .OrderByDescending(m => m.Tier == PrivTier.Critical)
-                .ThenByDescending(m => m.State.IsEnabledByDefault)
-                .ThenBy(m => m.Name, StringComparer.OrdinalIgnoreCase))
+            sb.AppendLine("Interpretation notes:");
+            sb.AppendLine("- Enabled privileges are the strongest practical signal (immediate leverage).");
+            sb.AppendLine("- Present-only privileges may be expected on elevated/system tokens; treat them as blast-radius indicators unless you can show they are enabled or reachable via specific code paths.");
+            if (t.IntegrityLevel == IntegrityLevel.High || t.IntegrityLevel == IntegrityLevel.System)
             {
-                sb.AppendLine($"- {grp.Name} ({grp.Tier}, {grp.State.LongLabel})");
+                sb.AppendLine("- This token runs at High/System integrity; many privileges can be present by design. Focus on enabled/default-enabled privileges and on reachable input surfaces.");
             }
+            sb.AppendLine();
+
+            sb.AppendLine("Observed privileges by state:");
+            WriteGroup(sb, "Enabled", g.Enabled);
+            WriteGroup(sb, "EnabledByDefault (but not currently enabled)", g.DefaultEnabled);
+            WriteGroup(sb, "Present (not enabled)", g.PresentOnly);
+            if (g.Removed.Count > 0)
+                WriteGroup(sb, "Removed", g.Removed);
 
             sb.AppendLine();
             sb.AppendLine("Investigation guidance (practical):");
-            sb.AppendLine("1) Confirm necessity: verify the process truly needs these privileges for its role. If not, remove or scope them.");
-            sb.AppendLine("2) Determine enablement: check whether the privilege is enabled by default or toggled dynamically (AdjustTokenPrivileges).");
-            sb.AppendLine("3) Map reachable inputs: enumerate IPC endpoints and parsing surfaces. Prioritize review/fuzzing where untrusted input intersects privileged operations.");
-            sb.AppendLine("4) Look for misuse patterns: authorization bypass, path canonicalization errors, object namespace confusion, and TOCTOU races around privileged file/registry operations.");
-            sb.AppendLine();
+            sb.AppendLine("1) Validate necessity: confirm each enabled/default-enabled privilege is required for the component role.");
+            sb.AppendLine("2) Determine activation: identify where privileges are enabled (AdjustTokenPrivileges) and what inputs influence those paths.");
+            sb.AppendLine("3) Intersect with surfaces: enumerate IPC endpoints and indirect handoffs; prioritize review/fuzzing where untrusted input reaches privileged operations.");
+            sb.AppendLine("4) Validate enforcement: authorization, identity binding, canonicalization, and TOCTOU-safe checks at use sites.");
 
-            // Provide concise mapping notes for the most important privileges present.
-            var critical = matches.Where(m => m.Tier == PrivTier.Critical).Select(m => m.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
-            var significant = matches.Where(m => m.Tier == PrivTier.Significant).Select(m => m.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
-
-            if (critical.Count > 0 || significant.Count > 0)
+            // Focus notes only for privileges that are actually enabled/default-enabled; keep it actionable and not noisy.
+            var highLeverage = g.Enabled.Concat(g.DefaultEnabled).ToList();
+            if (highLeverage.Count > 0)
             {
-                sb.AppendLine("Privilege notes (what to look for):");
+                sb.AppendLine();
+                sb.AppendLine("High-leverage notes (based on enabled/default-enabled privileges):");
 
-                if (critical.Contains("SeImpersonatePrivilege"))
+                if (highLeverage.Any(m => m.Name.Equals("SeImpersonatePrivilege", StringComparison.OrdinalIgnoreCase)))
                 {
-                    sb.AppendLine("- SeImpersonatePrivilege: raises the value of impersonation paths (named pipe/RPC/COM impersonation). Review any server-side impersonation flows for confused-deputy bugs and improper client identity binding.");
+                    sb.AppendLine("- SeImpersonatePrivilege: increases the value of server-side impersonation flows (named pipes/RPC/COM). Verify strict client identity binding and authorization before acting on caller-provided inputs.");
                 }
-                if (critical.Contains("SeAssignPrimaryTokenPrivilege"))
+
+                if (highLeverage.Any(m => m.Name.Equals("SeDebugPrivilege", StringComparison.OrdinalIgnoreCase)))
                 {
-                    sb.AppendLine("- SeAssignPrimaryTokenPrivilege: enables assigning primary tokens to processes. Review any process creation / token management code paths and ensure strict authorization.");
+                    sb.AppendLine("- SeDebugPrivilege: enables broad process access. If the process accepts untrusted inputs, validate it cannot be influenced to open/modify sensitive processes or handles.");
                 }
-                if (critical.Contains("SeDebugPrivilege"))
+
+                if (highLeverage.Any(m => m.Name.Equals("SeLoadDriverPrivilege", StringComparison.OrdinalIgnoreCase)))
                 {
-                    sb.AppendLine("- SeDebugPrivilege: can allow opening other process handles with broad access, enabling inspection/modification of sensitive processes if reachable. Validate it is not enabled unnecessarily and that related operations are locked down.");
+                    sb.AppendLine("- SeLoadDriverPrivilege: driver loading is a high-impact primitive. Ensure the process cannot be influenced to load attacker-controlled drivers or paths.");
                 }
-                if (critical.Contains("SeLoadDriverPrivilege"))
+
+                if (highLeverage.Any(m =>
+                        m.Name.Equals("SeBackupPrivilege", StringComparison.OrdinalIgnoreCase) ||
+                        m.Name.Equals("SeRestorePrivilege", StringComparison.OrdinalIgnoreCase)))
                 {
-                    sb.AppendLine("- SeLoadDriverPrivilege: driver loading is a high-impact primitive. Confirm the process cannot be influenced to load arbitrary drivers and that driver path handling is hardened.");
+                    sb.AppendLine("- SeBackupPrivilege / SeRestorePrivilege: can bypass typical file ACL intent via backup/restore semantics. Harden path canonicalization and TOCTOU controls around any privileged file operations.");
                 }
-                if (significant.Contains("SeBackupPrivilege") || significant.Contains("SeRestorePrivilege"))
+
+                if (highLeverage.Any(m => m.Name.Equals("SeTakeOwnershipPrivilege", StringComparison.OrdinalIgnoreCase)))
                 {
-                    sb.AppendLine("- SeBackupPrivilege / SeRestorePrivilege: can bypass typical file ACL intent via backup/restore semantics. Audit any file operations that use these semantics and ensure canonicalization + TOCTOU controls.");
-                }
-                if (significant.Contains("SeTakeOwnershipPrivilege"))
-                {
-                    sb.AppendLine("- SeTakeOwnershipPrivilege: enables ownership takeover of securable objects. Confirm the process cannot be driven to take ownership of attacker-chosen targets.");
+                    sb.AppendLine("- SeTakeOwnershipPrivilege: can take ownership of securable objects. Confirm the process cannot be driven to take ownership of attacker-chosen targets.");
                 }
             }
 
-            // Include small token context to aid analysts without over-claiming.
             sb.AppendLine();
             sb.AppendLine("Token context:");
             sb.AppendLine($"- IntegrityLevel: {t.IntegrityLevel}");
@@ -302,30 +352,20 @@ namespace PTTBM.Collectors.Rules
             return sb.ToString().TrimEnd();
         }
 
-        // =========================
-        // Privilege extraction helpers (robust to model changes)
-        // =========================
-
-        private static string? GetPrivilegeName(TokenPrivilegeInfo p)
+        private static void WriteGroup(StringBuilder sb, string title, IReadOnlyList<PrivMatch> items)
         {
-            // Your model likely exposes Name, but this keeps the rule resilient if you refactor later.
-            try
-            {
-                return p.Name;
-            }
-            catch
-            {
-                return null;
-            }
-        }
+            sb.AppendLine($"- {title}:");
 
-        private static PrivState GetPrivilegeState(TokenPrivilegeInfo p)
-        {
-            return new PrivState(
-                IsEnabled: p.IsEnabled,
-                IsEnabledByDefault: p.IsEnabledByDefault,
-                IsRemoved: p.IsRemoved
-            );
+            if (items.Count == 0)
+            {
+                sb.AppendLine("  - <empty>");
+                return;
+            }
+
+            foreach (var m in items)
+            {
+                sb.AppendLine($"  - {m.Name} ({m.Tier})");
+            }
         }
 
         // =========================
@@ -346,21 +386,13 @@ namespace PTTBM.Collectors.Rules
         private sealed record PrivState(
             bool IsEnabled,
             bool IsEnabledByDefault,
-            bool IsRemoved)
-        {
-            public bool IsEffectivelyEnabled => IsEnabled || IsEnabledByDefault;
+            bool IsRemoved);
 
-            public string ShortLabel =>
-                IsEnabled ? "enabled" :
-                IsEnabledByDefault ? "default" :
-                IsRemoved ? "removed" :
-                "present";
-
-            public string LongLabel =>
-                IsEnabled ? "enabled" :
-                IsEnabledByDefault ? "enabled by default (but not currently enabled)" :
-                IsRemoved ? "removed from token" :
-                "present (not enabled)";
-        }
+        private sealed record PrivGroups(
+            IReadOnlyList<PrivMatch> Enabled,
+            IReadOnlyList<PrivMatch> DefaultEnabled,
+            IReadOnlyList<PrivMatch> PresentOnly,
+            IReadOnlyList<PrivMatch> Removed,
+            IReadOnlyList<PrivMatch> All);
     }
 }
