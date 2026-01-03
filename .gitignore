@@ -1,0 +1,29 @@
+# ============================
+# Visual Studio / C# artifacts
+# ============================
+
+# Visual Studio cache / workspace
+.vs/
+*.vsidx
+
+# Build outputs
+bin/
+obj/
+
+# ============================
+# Optional (recommended)
+# ============================
+
+# User-specific files
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# Rider / other IDEs (safe even if unused)
+.idea/
+*.iml
+
+# OS artifacts
+Thumbs.db
+.DS_Store
