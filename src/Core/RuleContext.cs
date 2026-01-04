@@ -12,8 +12,7 @@ namespace WTBM.Core
 
         public PrivilegeStats PrivilegeStats { get; }
 
-        public IReadOnlyList<NamedPipeEndpoint> NamedPipes { get; init; }
-            = Array.Empty<NamedPipeEndpoint>();
+        public IReadOnlyList<NamedPipeEndpoint> NamedPipes { get; }
         
         public IReadOnlyDictionary<int, ProcessSnapshot> ByPid { get; }
         
@@ -21,10 +20,12 @@ namespace WTBM.Core
         
         public IReadOnlyDictionary<string, List<ProcessSnapshot>> ByAuthenticationId { get; }
 
-        public RuleContext(IReadOnlyList<ProcessSnapshot> snapshots)
+        public RuleContext(IReadOnlyList<ProcessSnapshot> snapshots, IReadOnlyList<NamedPipeEndpoint> namedPipes)
         {
             Snapshots = snapshots ?? throw new ArgumentNullException(nameof(snapshots));
             PrivilegeStats = PrivilegeStats.Build(Snapshots);
+
+            NamedPipes = namedPipes ?? throw new ArgumentNullException(nameof(namedPipes));
 
             // PID is unique in a point-in-time snapshot (best-effort).
             ByPid = snapshots

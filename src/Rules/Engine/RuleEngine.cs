@@ -1,10 +1,11 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Text;
+using WTBM.Core;
+using WTBM.Domain.Findings;
+using WTBM.Domain.IPC;
 using WTBM.Domain.Processes;
 using WTBM.Rules.Abstractions;
-using WTBM.Domain.Findings;
-using WTBM.Core;
 
 namespace WTBM.Rules.Engine
 {
@@ -12,12 +13,13 @@ namespace WTBM.Rules.Engine
     {
         public static List<Finding> EvaluateAll(
             IReadOnlyList<ProcessSnapshot> snapshots,
+            IReadOnlyList<NamedPipeEndpoint> namedPipes,
             IReadOnlyList<IRule> rules)
         {
             if (snapshots is null) throw new ArgumentNullException(nameof(snapshots));
             if (rules is null) throw new ArgumentNullException(nameof(rules));
 
-            var ctx = new RuleContext(snapshots);
+            var ctx = new RuleContext(snapshots, namedPipes);
 
             var results = new List<Finding>();
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);

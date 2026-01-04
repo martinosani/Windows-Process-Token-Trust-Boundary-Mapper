@@ -3,6 +3,7 @@ using WTBM.Renders.OutputWriter;
 using System;
 using WTBM.Output.Terminal;
 using WTBM.Rules.Engine;
+using WTBM.Collectors.IPC;
 
 namespace WTBM
 {
@@ -17,9 +18,14 @@ namespace WTBM
             var tokenCollector = new TokenCollector();
             var snapshots = processes.Select(p => tokenCollector.TryCollect(p)).ToList();
 
-            var rules = DefaultRuleSet.Create();
-            var findings = RuleEngine.EvaluateAll(snapshots, rules);
+            var namedPipes = new NamedPipeEnumerator().Enumerate();
+            
+            // NamedPipesConsoleWriter.WriteSummary(namedPipes, namedPipesSecurityInfo);
 
+            var rules = DefaultRuleSet.Create();
+            var findings = RuleEngine.EvaluateAll(snapshots, namedPipes,  rules);
+
+            /*
             FindingsConsoleWriter.WriteSummary(findings, snapshots);
 
             if (findings.Count > 0)
@@ -27,7 +33,7 @@ namespace WTBM
                 Console.WriteLine();
 
                 FindingsConsoleWriter.Explain(findings[0], snapshots);
-            }
+            }*/
 
             Console.ReadLine();
 
