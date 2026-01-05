@@ -11,16 +11,24 @@ namespace WTBM.Renders.OutputWriter
     /// triage-friendly view. The output is deterministic and resilient: per-item rendering issues
     /// do not stop the run.
     /// </summary>
-    internal sealed class ProcessSnapshotConsoleSummaryWriter : IOutputWriter
+    internal static class ProcessSnapshotConsoleSummaryWriter
     {
-        public OutputOptions Options { get; }
+        private static int MaxColumnWidth = 48;
 
-        public ProcessSnapshotConsoleSummaryWriter(OutputOptions? options = null)
+        private static bool IncludeFlags = true;
+
+        private static bool IncludeNotes = true;
+
+        private static SummaryVerbosity Verbosity = SummaryVerbosity.Normal;
+
+        internal enum SummaryVerbosity
         {
-            Options = options ?? new OutputOptions();
+            Minimal = 0,
+            Normal = 1,
+            Verbose = 2
         }
 
-        public void WriteSummary(IEnumerable<ProcessSnapshot> snapshots)
+        public static void WriteSummary(IEnumerable<ProcessSnapshot> snapshots)
         {
             if (snapshots is null) throw new ArgumentNullException(nameof(snapshots));
 
@@ -70,11 +78,11 @@ namespace WTBM.Renders.OutputWriter
             public required string Separator { get; init; }
         }
 
-        private Layout BuildLayout()
+        private static Layout BuildLayout()
         {
             // Fixed widths for stable scanning; only variable columns are truncated by MaxColumnWidth.
             // Keep the output predictable and diff-friendly.
-            var max = Options.MaxColumnWidth;
+            var max = MaxColumnWidth;
 
             int NameW = ClampWidth(24, max);
             int UserW = ClampWidth(28, max);
@@ -90,12 +98,12 @@ namespace WTBM.Renders.OutputWriter
             new("Name",  NameW, s => Safe(s.Process.Name)),
         };
 
-            if (Options.Verbosity >= SummaryVerbosity.Normal)
+            if (Verbosity >= SummaryVerbosity.Normal)
             {
                 cols.Add(new Col("User", UserW, s => FormatIdentity(s.Token.UserName, s.Token.UserSid)));
             }
 
-            if (Options.Verbosity >= SummaryVerbosity.Verbose)
+            if (Verbosity >= SummaryVerbosity.Verbose)
             {
                 cols.Add(new Col("Owner", OwnerW, s => FormatIdentity(s.Token.OwnerName, s.Token.OwnerSid)));
                 cols.Add(new Col("Type", 10, s => FormatTokenType(s.Token)));
@@ -104,12 +112,12 @@ namespace WTBM.Renders.OutputWriter
                 cols.Add(new Col("R", 2, s => Bool01(s.Token.IsRestricted)));
             }
 
-            if (Options.IncludeFlags)
+            if (IncludeFlags)
             {
                 cols.Add(new Col("Flags", 18, s => BuildFlags(s.Token)));
             }
 
-            if (Options.IncludeNotes)
+            if (IncludeNotes)
             {
                 cols.Add(new Col("Notes", NotesW, s => BuildNotes(s)));
             }
@@ -121,7 +129,7 @@ namespace WTBM.Renders.OutputWriter
             };
         }
 
-        private void WriteHeader(Layout layout)
+        private static void WriteHeader(Layout layout)
         {
             // Header
             var sb = new StringBuilder();
@@ -145,7 +153,7 @@ namespace WTBM.Renders.OutputWriter
             Console.WriteLine(sb.ToString());
         }
 
-        private void WriteRow(Layout layout, ProcessSnapshot s)
+        private static void WriteRow(Layout layout, ProcessSnapshot s)
         {
             var sb = new StringBuilder();
 
@@ -167,7 +175,7 @@ namespace WTBM.Renders.OutputWriter
             Console.WriteLine(sb.ToString());
         }
 
-        private void WriteRowFallback(Layout layout, ProcessSnapshot s)
+        private static void WriteRowFallback(Layout layout, ProcessSnapshot s)
         {
             // Minimal degraded row. Do not throw.
             var name = Safe(s.Process.Name);
@@ -202,7 +210,7 @@ namespace WTBM.Renders.OutputWriter
 
         private static string Bool01(bool? v) => v switch { true => "Y", false => "N", _ => "?" };
 
-        private string FormatIdentity(string? name, string? sid)
+        private static string FormatIdentity(string? name, string? sid)
         {
             // For triage, show the name if available; fallback to SID; otherwise show placeholder.
             if (!string.IsNullOrWhiteSpace(name)) return name!;
@@ -231,7 +239,7 @@ namespace WTBM.Renders.OutputWriter
             return $"{et}/{elev}";
         }
 
-        private string BuildFlags(TokenInfo t)
+        private static string BuildFlags(TokenInfo t)
         {
             // Compact flags column. Keep stable ordering and avoid noise.
             // Flags are intended for scanning, not for full explanation.
@@ -262,10 +270,10 @@ namespace WTBM.Renders.OutputWriter
             var joined = flags.Count == 0 ? "-" : string.Join(",", flags);
 
             // Respect MaxColumnWidth: flags are already small, but clamp anyway.
-            return Truncate(joined, Options.MaxColumnWidth ?? int.MaxValue);
+            return Truncate(joined, MaxColumnWidth);
         }
 
-        private string BuildNotes(ProcessSnapshot s)
+        private static string BuildNotes(ProcessSnapshot s)
         {
             // Notes are intended to capture visibility boundaries and collection issues without flooding output.
             // Prefer process/token CollectionError when present. Avoid printing large warning lists in summary mode.
@@ -277,18 +285,18 @@ namespace WTBM.Renders.OutputWriter
             if (!string.IsNullOrWhiteSpace(s.Token.CollectionError))
                 parts.Add($"tok:{s.Token.CollectionError}");
 
-            if (Options.Verbosity == SummaryVerbosity.Verbose && s.Token.CollectionWarnings is not null && s.Token.CollectionWarnings.Count > 0)
+            if (Verbosity == SummaryVerbosity.Verbose && s.Token.CollectionWarnings is not null && s.Token.CollectionWarnings.Count > 0)
                 parts.Add($"warn:{s.Token.CollectionWarnings.Count}");
 
             var joined = parts.Count == 0 ? "-" : string.Join(" ", parts);
-            return Truncate(joined, Options.MaxColumnWidth ?? int.MaxValue);
+            return Truncate(joined, MaxColumnWidth);
         }
 
         // =========================
         // String/width utilities
         // =========================
 
-        private int ClampWidth(int desired, int? max)
+        private static int ClampWidth(int desired, int? max)
             => max.HasValue ? Math.Min(desired, max.Value) : desired;
 
         private static string Truncate(string s, int width)

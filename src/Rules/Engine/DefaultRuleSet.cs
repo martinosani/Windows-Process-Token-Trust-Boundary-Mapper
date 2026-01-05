@@ -12,7 +12,7 @@ namespace WTBM.Rules.Engine
             => new IRule[]
             {
                 // Markers
-                new HighImpactPrivilegesRule(),
+                new HighImpactPrivilegeProcessesRule(),
 
 
                 /*

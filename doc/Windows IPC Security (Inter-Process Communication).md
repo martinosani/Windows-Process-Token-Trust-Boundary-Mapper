@@ -106,7 +106,7 @@ This section focuses on **how IPC mechanisms fail**, not just how they work.
 Named pipes are kernel-managed IPC objects that implement a client/server byte-stream or message-based communication model.  
 They are exposed to userland via the Win32 path `\\.\pipe\<Name>`. Internally, they exist as objects under the NT object namespace as `\Device\NamedPipe\<Name>`.
 
-A named pipe is not just “a file-like handle”. It has two related but distinct aspects:
+A named pipe is not just "a file-like handle". It has two related but distinct aspects:
 
 - **Namespace object (the name)**  
   The entry under `\Device\NamedPipe\<Name>` is a kernel object with a security descriptor (owner, DACL, label).  
@@ -163,7 +163,7 @@ The highest-value metadata is:
   - Session scoping matters for multi-session systems; a pipe surface may be different per session/user.
 
 - **Operational state**
-  - Some pipes exist but will appear “busy” during the query window due to all instances being occupied.
+  - Some pipes exist but will appear "busy" during the query window due to all instances being occupied.
   - A correct mapper must represent this state explicitly.
 
 ---

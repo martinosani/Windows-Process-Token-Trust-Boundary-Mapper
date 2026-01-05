@@ -25,7 +25,7 @@ namespace WTBM.Core
             Snapshots = snapshots ?? throw new ArgumentNullException(nameof(snapshots));
             PrivilegeStats = PrivilegeStats.Build(Snapshots);
 
-            NamedPipes = namedPipes ?? throw new ArgumentNullException(nameof(namedPipes));
+            NamedPipes = namedPipes ?? Array.Empty<NamedPipeEndpoint>();
 
             // PID is unique in a point-in-time snapshot (best-effort).
             ByPid = snapshots

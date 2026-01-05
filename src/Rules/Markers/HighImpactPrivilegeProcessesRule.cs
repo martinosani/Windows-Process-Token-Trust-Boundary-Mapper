@@ -9,7 +9,7 @@ using WTBM.Rules.Engine;
 
 namespace WTBM.Rules.Markers
 {
-    internal sealed class HighImpactPrivilegesRule : IRule
+    internal sealed class HighImpactPrivilegeProcessesRule : IRule
     {
         // Single source of truth:
         // presence in this map == privilege is in scope
