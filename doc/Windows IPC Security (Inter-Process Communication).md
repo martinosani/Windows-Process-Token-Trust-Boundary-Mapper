@@ -190,7 +190,7 @@ Common high-value failure patterns seen in real-world LPEs and broker escapes:
 
 ---
 
-## Named pipe extraction strategy (high-authority processes)
+#### Named pipe extraction strategy (high-authority processes)
 
 This section documents the current strategy implemented in WTBM to extract **named pipes associated with high-authority processes** and to enrich them with **stable identifiers** and **security metadata**.
 
@@ -198,7 +198,7 @@ The approach is intentionally low-level and handle-centric. It is designed for r
 
 ---
 
-### Rationale: process-attributed inventory
+##### Rationale: process-attributed inventory
 
 WTBM is not interested in producing a global list of visible pipes under `\\.\pipe\*`.
 The primary research question is instead:
@@ -211,7 +211,7 @@ This design choice allows later correlation rules to reason about **trust bounda
 
 ---
 
-### Privilege model
+##### Privilege model
 
 The extractor attempts to enable `SeDebugPrivilege` at initialization time in order to:
 
@@ -222,7 +222,7 @@ This step reduces avoidable access failures but does not guarantee full visibili
 
 ---
 
-### High-level extraction pipeline
+##### High-level extraction pipeline
 
 For each target process ID, the extractor performs the following steps:
 
@@ -240,7 +240,7 @@ The final output is a sorted list of `NamedPipeEndpoint` objects keyed by the pi
 
 ---
 
-### Handle enumeration and initial filtering
+##### Handle enumeration and initial filtering
 
 WTBM uses a system-wide handle snapshot and restricts it to a specific process ID.
 
@@ -248,7 +248,7 @@ Only handles whose `ObjectType` is reported as `File` are considered. Named pipe
 
 ---
 
-### Handle duplication
+##### Handle duplication
 
 To query object metadata safely from user space, each candidate handle is duplicated into the current process using `DuplicateHandle` with `DUPLICATE_SAME_ACCESS`.
 
@@ -256,7 +256,7 @@ All subsequent queries (name and security) operate on the duplicated handle, not
 
 ---
 
-### Access-mask and attribute heuristics
+##### Access-mask and attribute heuristics
 
 Not all file handles are equally useful or stable to query. The extractor applies a conservative heuristic:
 
@@ -273,7 +273,7 @@ These checks do not guarantee safety, but they significantly reduce the number o
 
 ---
 
-### Object name resolution with bounded execution
+##### Object name resolution with bounded execution
 
 Resolving an object name via `NtQueryObject(ObjectNameInformation)` can block indefinitely for certain IPC endpoints, especially high-churn named pipes used by modern frameworks.
 
@@ -291,7 +291,7 @@ This design treats object name resolution as **best-effort** and explicitly prio
 
 ---
 
-### Named pipe identification via NT namespace
+##### Named pipe identification via NT namespace
 
 After successful name resolution, a handle is classified as a named pipe only if its kernel path starts with:
 
@@ -303,7 +303,7 @@ This check is explicit and avoids misclassifying other file-backed objects or de
 
 ---
 
-### Stable pipe identity construction
+##### Stable pipe identity construction
 
 For each named pipe, the extractor builds a `NamedPipeRef` containing:
 
@@ -316,7 +316,7 @@ Any normalization (such as replacing path separators) is limited to the display 
 
 ---
 
-### Security descriptor retrieval (by handle)
+##### Security descriptor retrieval (by handle)
 
 Security metadata is retrieved using the duplicated handle, not the pipe name.
 
@@ -332,7 +332,7 @@ If security retrieval fails, the error is stored alongside the pipe rather than 
 
 ---
 
-### Deduplication and merge strategy
+##### Deduplication and merge strategy
 
 The stable identity of a pipe is its NT path.
 
@@ -345,7 +345,7 @@ This avoids duplicate output while preserving the most informative observation.
 
 ---
 
-### Observability guarantees and limitations
+##### Observability guarantees and limitations
 
 This strategy provides:
 
@@ -362,7 +362,7 @@ Those aspects are intentionally deferred to later analysis stages that consume t
 
 ---
 
-### Role in the overall research workflow
+##### Role in the overall research workflow
 
 This extraction layer is designed to produce high-fidelity evidence objects that later rules can analyze for trust-boundary exposure.
 
@@ -370,22 +370,22 @@ By separating *collection* from *interpretation*, WTBM keeps the system understa
 
 ---
 
-## Vulnerability research workflow (how to use the extracted data)
+##### Vulnerability research workflow (how to use the extracted data)
 
-### Step 1: Triage for reachability
+###### Step 1: Triage for reachability
 Start with the DACL:
 - Identify principals representing low-trust callers (`Users`, `Authenticated Users`, `Everyone`, broad groups).
 - Look for overly broad allow ACEs on the pipe object.
 
 This is the fastest way to identify “unexpected caller can reach server”.
 
-### Step 2: Attribute the endpoint
+###### Step 2: Attribute the endpoint
 Use owner information and name patterns to form hypotheses:
 - Service/SYSTEM ownership → likely privileged server.
 - Stable naming → more likely long-lived interface worth deeper study.
 - Random naming → often ephemeral broker channel; may still be relevant but requires different collection tactics.
 
-### Step 3: Validate server behavior (beyond ACLs)
+###### Step 3: Validate server behavior (beyond ACLs)
 ACL reachability is only one side. The core research questions are:
 - Does the server impersonate? At what level?
 - Is authorization checked per operation?
@@ -394,7 +394,7 @@ ACL reachability is only one side. The core research questions are:
 
 The pipe SD tells you who can talk. The vulnerability usually lies in what happens after the server accepts input.
 
-### Step 4: Feed tooling improvements back into collection
+###### Step 4: Feed tooling improvements back into collection
 If a high-value pipe is persistently busy:
 - increase retry window for that specific target,
 - run multi-pass sampling,
@@ -404,7 +404,7 @@ For a research tool, it is better to report “busy, not observed” than to sil
 
 ---
 
-#### Representing extraction outcomes explicitly
+##### Representing extraction outcomes explicitly
 For research correctness, the tool should not collapse all failures into “no data”.
 
 Each pipe should have an explicit extraction outcome, for example:
@@ -420,7 +420,7 @@ Storing this state explicitly prevents misinterpretation and allows:
 
 ---
 
-#### Implementation notes (C# tool design)
+##### Implementation notes (C# tool design)
 To keep the tool reliable and research-friendly:
 
 - Always store:
