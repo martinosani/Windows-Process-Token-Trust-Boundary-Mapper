@@ -4,7 +4,6 @@ using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Xml.Linq;
-using WTBM.Collectors.IPC.OLD;
 using WTBM.Domain.IPC;
 using WTBM.NtNative;
 using static WTBM.NtNative.Win32Security;
@@ -119,34 +118,36 @@ namespace WTBM.Collectors.IPC
                     var namedPipeRef = getNamedPipeRef(fullPath);
                     // Logger.LogDebug(String.Format("[PID:{0}] Named pipe|NtPath={1} | Win32Path={2}", pid, namedPipeRef.NtPath, namedPipeRef.Win32Path));
 
-                    NamedPipeSecurityInfo npsi = null;
-                    
+                    //NamedPipeSecurityInfo npsi = null;
+                    SecurityDescriptorInfo sd = null;
+
                     try
                     {
                         // var sd = Win32Security.GetSecurityDescriptor(namedPipeRef.Win32Path);
                         //Logger.LogDebug($"[PID:{pid}] SD query START | {namedPipeRef.Win32Path}");
-                        var sd = Win32Security.GetSecurityDescriptorByHandle(dupHandle);
+                        sd = Win32Security.GetSecurityDescriptorByHandle(dupHandle);
                         //Logger.LogDebug($"[PID:{pid}] SD query END   | {namedPipeRef.Win32Path}");
 
-                        npsi = new NamedPipeSecurityInfo
+                        /*npsi = new NamedPipeSecurityInfo
                         {
                             OwnerName = sd.OwnerName,
                             OwnerSid = sd.OwnerSid,
                             Sddl = sd.Sddl,
-                        };
+                        };*/
                     }
                     catch (Exception ex)
                     {
-                        npsi = new NamedPipeSecurityInfo
+                        sd = new SecurityDescriptorInfo(null, null, null, null, ex.Message);
+                        /*npsi = new NamedPipeSecurityInfo
                         {
                             Error = ex.Message
-                        };
+                        };*/
                     }
 
                     var endpoint = new NamedPipeEndpoint
                     {
                         Pipe = namedPipeRef,
-                        Security = npsi,
+                        Security = sd,
                         ServerPid = pid
                     };
 

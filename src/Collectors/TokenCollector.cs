@@ -810,6 +810,11 @@ namespace WTBM.Collectors
                 // TODO: log: exception type + message
                 return null;
             }
+            catch (Exception ex)
+            {
+                Logger.LogDebug(ex.Message);
+                return null;
+            }
         }
 
         private static int GetSidSubAuthorityCountManaged(IntPtr sid)

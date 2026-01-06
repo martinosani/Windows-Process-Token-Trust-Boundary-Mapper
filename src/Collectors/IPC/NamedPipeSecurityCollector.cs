@@ -5,7 +5,6 @@ using System.Runtime.InteropServices;
 using System.Security.AccessControl;
 using System.Security.Principal;
 using System.Text;
-using WTBM.Collectors.IPC.OLD;
 using WTBM.Domain.IPC;
 
 namespace WTBM.Collectors.IPC

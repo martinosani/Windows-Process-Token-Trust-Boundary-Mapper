@@ -457,7 +457,6 @@ namespace WTBM.Output.Terminal
             Console.WriteLine($"  Name      : {proc.Name}");
             Console.WriteLine($"  PID/PPID   : {proc.Pid} / {proc.Ppid}");
             Console.WriteLine($"  User       : {userBucket}");
-            Console.WriteLine($"  UserName   : {token.UserName ?? "Unknown"}");
             Console.WriteLine($"  UserSid    : {token.UserSid ?? "Unknown"}");
             Console.WriteLine($"  IL         : {token.IntegrityLevel} ({il})");
             Console.WriteLine($"  Session    : {sess}");

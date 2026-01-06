@@ -1,7 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Text;
-using WTBM.Collectors.IPC.OLD;
+using static WTBM.NtNative.Win32Security;
 
 namespace WTBM.Domain.IPC
 {
@@ -10,7 +10,7 @@ namespace WTBM.Domain.IPC
         public NamedPipeRef Pipe { get; init; } = default!;
 
         // Security
-        public NamedPipeSecurityInfo Security {  get; init; } = new NamedPipeSecurityInfo { Error = "Uninitialized" };
+        public SecurityDescriptorInfo Security {  get; init; }
 
         // Reachability
         public bool? ReachableFromMedium { get; init; }

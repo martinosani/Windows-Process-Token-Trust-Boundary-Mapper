@@ -122,7 +122,9 @@ namespace WTBM
                     {
                         var pipes = npe.GetNamedPipesFromProcessHandles(process.Pid);
                         namedPipes.AddRange(pipes);
-                    }                    
+                    }
+                    
+                    NamedPipesConsoleWriter.WriteSummary(namedPipes);
                 }
 
                 if (enumeration)
