@@ -223,8 +223,8 @@ namespace WTBM.Collectors.IPC
 
             return new NamedPipeRef(
                 Name: displayName ?? ntFullPath,
-                Win32Path: PipeRootWin32 + displayName,
-                NtPath: PipeRootNt + displayName
+                Win32Path: PipeRootWin32 + relativeName,
+                NtPath: ntFullPath
             );
 
             return null;
