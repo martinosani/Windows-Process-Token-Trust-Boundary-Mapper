@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.Linq;
 using WTBM.Domain.Findings;
+using WTBM.Domain.IPC;
 using WTBM.Domain.Processes;
 
 namespace WTBM.Output.Terminal
@@ -39,6 +40,8 @@ namespace WTBM.Output.Terminal
             Console.WriteLine($"Total findings: {findingList.Count}");
             Console.WriteLine();
         }
+
+
 
         public static void Explain(Finding finding, IReadOnlyList<ProcessSnapshot> snapshots)
         {

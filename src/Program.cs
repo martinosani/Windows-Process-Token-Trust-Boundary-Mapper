@@ -143,7 +143,7 @@ namespace WTBM
                     var findings = RuleEngine.EvaluateAll(processSnapshots, namedPipes, rules);
 
                     var max = top.HasValue ? top.Value : -1;
-                    FindingsConsoleWriter.WriteSummary(findings, processSnapshots, max);
+                    FindingsConsoleWriter.WriteSummary(findings, processSnapshots);
 
                     if (explainRule && processes.Count == 1)
                     {
