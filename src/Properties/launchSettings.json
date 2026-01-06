@@ -1,0 +1,8 @@
+{
+  "profiles": {
+    "WTBM": {
+      "commandName": "Project",
+      "commandLineArgs": "process --named-pipes"
+    }
+  }
+}

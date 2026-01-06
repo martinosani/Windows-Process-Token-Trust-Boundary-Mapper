@@ -1,7 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Text;
-using WTBM.Collectors.IPC;
+using WTBM.Collectors.IPC.OLD;
 
 namespace WTBM.Domain.IPC
 {

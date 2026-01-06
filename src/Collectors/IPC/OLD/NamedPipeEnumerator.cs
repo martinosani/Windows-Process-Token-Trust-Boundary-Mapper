@@ -6,7 +6,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using WTBM.Domain.IPC;
 
-namespace WTBM.Collectors.IPC
+namespace WTBM.Collectors.IPC.OLD
 {
     /// <summary>
     /// Enumerates named pipe endpoints currently exposed by the system and enriches them with

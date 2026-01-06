@@ -54,6 +54,11 @@ namespace WTBM
                 Description = "Prints a detailed explanation for each rule finding associated with the process specified via --process-pid."
             };
 
+            var namedPipesOption = new Option<bool>("named-pipes", "--named-pipes")
+            {
+                Description = "Enumerates Named Pipes associated with the high authority processes retrieved."
+            };
+
             var topOption = new Option<int?>("top", "--top")
             {
                 Description = "Limits the number of process snapshots printed during enumeration."
@@ -74,6 +79,7 @@ namespace WTBM
             processCommand.Add(ruleOption);
             processCommand.Add(processPidOption);
             processCommand.Add(ruleExplainOption);
+            processCommand.Add(namedPipesOption);
             processCommand.Add(topOption);
             processCommand.Add(verboseOption);
             processCommand.Add(pauseOption);
@@ -87,6 +93,7 @@ namespace WTBM
                 bool verbose = result.GetValue(verboseOption);
                 bool pause = result.GetValue(pauseOption);
                 bool explainRule = result.GetValue(ruleExplainOption);
+                bool getNamedPipes = result.GetValue(namedPipesOption);
 
                 var processes = new ProcessEnumerator().Enumerate();
                 var tokenCollector = new TokenCollector();
@@ -110,9 +117,20 @@ namespace WTBM
                     if (top.HasValue && top.Value > 0)
                     {
                         processSnapshots = processSnapshots.Take(top.Value).ToList();
-                    }
+                    }                    
 
                     ProcessSnapshotConsoleSummaryWriter.WriteSummary(processSnapshots);
+                }
+
+                if (getNamedPipes)
+                {
+                    var namedPipeEndpoints = Array.Empty<NamedPipeEndpoint>();
+                    var namedPipeExtract = new NamedPipeExtractor();
+
+                    foreach (var process in processes)
+                    {
+                        var pipes = namedPipeExtract.GetNamedPipesFromProcessHandles(process.Pid);
+                    }
                 }
 
                 if (!String.IsNullOrEmpty(rule))
