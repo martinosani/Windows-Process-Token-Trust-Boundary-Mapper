@@ -1,32 +1,32 @@
 # Windows IPC Security (Inter-Process Communication)
 
-This document explains **Windows Inter-Process Communication (IPC)** from a **Windows Internals and security research** perspective.
+This document explains **Windows Inter-Process Communication (IPC)** from a **Windows internals and security research** perspective.
 
-The goal is not to catalog APIs, but to provide a **mental and analytical framework** for understanding **where trust boundaries actually exist**, how OS and application components cross them, and why IPC is one of the most common roots of real-world Windows vulnerabilities.
+The goal is not to catalog APIs. The goal is to provide a practical framework for understanding:
 
-In PTTBM, IPC is treated as a **first-class trust-boundary surface**.  
-Where IPC reachability/consumption is not evaluated, this is explicitly treated as a **visibility boundary**, not as evidence that the surface does not exist.
+- where trust boundaries exist in real systems,
+- how components cross them,
+- what evidence you can collect to reason about reachability and authority,
+- and why IPC design and authorization mistakes are a frequent root cause of Windows vulnerabilities.
+
+In PTTBM, IPC is treated as a first-class trust-boundary surface. Where reachability or consumption is not evaluated, that is recorded as a **visibility boundary** (a data limitation), not as evidence that the surface is safe or absent.
 
 ---
 
 ## 1. Why IPC matters for Windows security
 
-IPC is where Windows security architecture becomes concrete.
+IPC is where privilege separation becomes operational.
 
-At a high level, most modern Windows systems are built around the idea that:
-- **low-trust components exist**
-- **high-trust components exist**
-- lower-trust code must request higher-trust work indirectly
-
-IPC is the mechanism that makes this delegation possible.
+Most modern Windows systems have a mix of low-trust and high-trust components. The lower-trust parts still need higher-trust work done (filesystem operations, device access, policy-enforced actions, privileged configuration, brokered capabilities). IPC is the mechanism that makes that delegation possible.
 
 As a result, IPC is where:
+
 - sandbox boundaries are enforced (or fail),
 - privilege separation succeeds or collapses,
 - confused-deputy vulnerabilities emerge,
-- local privilege escalation chains are built.
+- local privilege escalation (LPE) chains are built.
 
-Many severe Windows vulnerabilities are not about memory corruption in isolation, but about **high-trust code acting on lower-trust input**.
+Many serious vulnerabilities are not “memory corruption in isolation”. They are cases where high-authority code performs privileged work based on lower-trust input.
 
 ---
 
@@ -34,28 +34,29 @@ Many severe Windows vulnerabilities are not about memory corruption in isolation
 
 ### IPC is not just “communication”
 
-Every IPC endpoint implicitly answers security questions:
+Every IPC endpoint implicitly answers a set of security questions:
 
-- Who is allowed to reach this endpoint?
+- Who can reach this endpoint?
 - Under what identity does the server execute?
 - What privileged actions can the server perform?
-- How does the server authenticate and authorize the caller?
-- How does the server validate the request (paths, object names, parameters)?
-- Does the server re-validate at the use site to prevent TOCTOU?
+- How does the server authenticate the caller?
+- How does the server authorize requests (per endpoint and per operation)?
+- How does the server validate inputs (paths, object names, parameters)?
+- Does it re-validate at the use site to reduce TOCTOU risk?
 
-From a security perspective, an IPC interface is an **API boundary with authority behind it**.
+From a security perspective, an IPC interface is an API boundary with authority behind it.
 
-If the authority of the server exceeds the trust of the caller, the IPC boundary becomes a **privilege boundary**.
+If the authority of the server exceeds the trust of the caller, the IPC boundary is a privilege boundary.
 
 ---
 
 ### Trust transitions commonly mediated by IPC
 
-Real-world Windows designs frequently rely on IPC to cross these boundaries:
+Real Windows and Windows application architectures routinely cross boundaries via IPC:
 
-- **Low Integrity → Medium Integrity** (browser sandboxes, renderers)
-- **Medium Integrity → High Integrity** (UAC helpers, elevated components)
-- **Medium/High Integrity → SYSTEM** (services)
+- **Low integrity → Medium integrity** (browser sandboxes, renderers)
+- **Medium integrity → High integrity** (UAC helpers, elevated components)
+- **Medium/High integrity → SYSTEM** (services)
 - **AppContainer → broker** (capability-mediated access)
 - **Unprivileged user → service account**
 
@@ -65,92 +66,101 @@ In vulnerability research, these transitions matter more than absolute privilege
 
 ## 3. IPC risk model: Reachability × Authority
 
-IPC risk can be modeled as the combination of two dimensions.
+A useful way to reason about IPC risk is as the product of two dimensions.
 
 ### 3.1 Reachability
 
 Can a lower-trust subject reach the IPC endpoint at all?
 
-Determined by:
+Reachability is determined by:
+
 - object DACLs,
 - COM/RPC permissions,
 - session boundaries,
 - integrity level enforcement (MIC/UIPI),
 - AppContainer capability checks,
-- and “who can open or connect” semantics.
+- and “who can open/connect” semantics specific to the mechanism.
 
-If the endpoint is not reachable, it is not part of that boundary.
+If the endpoint is not reachable, it is not part of that trust boundary.
 
 ### 3.2 Authority
 
 What happens if the endpoint is reached?
 
-Authority is defined by:
-- server token (integrity, elevation, privileges),
-- impersonation semantics (whether the server acts as itself or as the client),
+Authority is driven by:
+
+- the server token (integrity, elevation, privileges),
+- impersonation semantics (server acts as itself vs acts as the client),
 - and the operations performed on behalf of the caller.
 
-High authority combined with reachability creates high-risk surfaces.
+High authority combined with reachability creates high-value attack surfaces.
 
 ---
 
 ## 4. Explicit IPC mechanisms (security-oriented view)
 
-This section focuses on **how IPC mechanisms fail**, not just how they work.
+This section focuses on how IPC mechanisms fail, not just how they work.
 
 ---
 
 ### 4.1 Named Pipes
 
 #### What they are
-Named pipes are kernel-managed IPC objects that implement a client/server byte-stream or message-based communication model.  
-They are exposed to userland via the Win32 path `\\.\pipe\<Name>`. Internally, they exist as objects under the NT object namespace as `\Device\NamedPipe\<Name>`.
 
-A named pipe is not just "a file-like handle". It has two related but distinct aspects:
+Named pipes are kernel-managed IPC objects that implement a client/server byte-stream or message-based model.
+
+- Win32 path: `\\.\pipe\<Name>`
+- NT object namespace: `\Device\NamedPipe\<Name>`
+
+A named pipe is not just “a file-like handle”. There are two related but distinct layers you need to keep separate when building tools:
 
 - **Namespace object (the name)**  
   The entry under `\Device\NamedPipe\<Name>` is a kernel object with a security descriptor (owner, DACL, label).  
-  This is what you want when you do surface mapping and access control analysis.
+  This is the layer you want for surface mapping, ACL analysis, and reachability hypotheses.
 
 - **Server instances (the endpoints)**  
   A pipe name can have one or more server instances created by the server using `CreateNamedPipe`.  
-  Clients connect to an available instance. Many behaviors you observe (including `PIPE_BUSY`) are about instance availability, not about the absence of the name.
+  Clients connect to an available instance. Many runtime behaviors (including `PIPE_BUSY`) are about instance availability, not about whether the pipe name exists.
 
-This distinction matters for tooling and research because you can often enumerate names, but querying metadata may be blocked by runtime instance state.
+This distinction matters because you can often enumerate names, while metadata queries can fail or block depending on instance state and timing.
 
 ---
 
 #### Why they matter
-Named pipes are pervasive in Windows userland software and are often used to connect:
-- a low-privilege UI or client component
+
+Named pipes are pervasive in Windows userland software and are commonly used to connect:
+
+- a low-privilege UI/client component
 - to a higher-privilege service or broker component
 
 That makes named pipes one of the most common practical privilege boundaries in Windows applications.
 
-In vulnerability research, pipes show up repeatedly because the most common failures are *design and authorization errors*, not complex memory corruption:
-- A caller is able to reach an endpoint it was not meant to reach.
-- The server performs privileged actions based on untrusted inputs.
+In real-world LPE and broker-escape work, pipes show up repeatedly because the most common failures are design and authorization errors:
+
+- A caller can reach an endpoint it was not meant to reach.
+- The server performs privileged actions on untrusted input.
 - Identity is not correctly bound to intent.
 
 ---
 
 #### Security properties that matter (what to extract and why)
-For each pipe you enumerate, the goal is to turn a **name** into an evidence-backed **reachability and trust hypothesis**.
 
-The highest-value metadata is:
+For each pipe you enumerate, the goal is to turn a **name** into evidence-backed reachability and trust hypotheses.
+
+High-value metadata includes:
 
 - **Owner**
   - Helps attribute the pipe to a principal (SYSTEM, service SID, per-user component).
   - Useful for prioritization: privileged owner often correlates with privileged behavior.
 
 - **DACL (Discretionary ACL)**
-  - Core reachability signal: who can open/connect.  
-  - Overly broad DACLs are common and are often accidental.
+  - Core reachability signal: who can open/connect.
+  - Overly broad DACLs are common and often accidental.
   - In triage, focus on identities that represent lower-trust callers (e.g., `Users`, `Authenticated Users`, `Everyone`, low-priv service accounts).
 
-- **SDDL (string form of the SD)**
-  - Stable representation: useful for baselines, diffing, and reporting.
-  - Lets you compare configurations across machines/builds without losing detail.
+- **SDDL (string form of the security descriptor)**
+  - Stable representation for baselines, diffing, and reporting.
+  - Allows comparisons across machines/builds without losing detail.
 
 - **Mandatory Integrity Label (MIL)**
   - Adds MIC context (Low IL, AppContainer, etc.).
@@ -158,35 +168,36 @@ The highest-value metadata is:
   - Missing MIL data is not evidence of safety; it may be a visibility limitation.
 
 - **Name characteristics and scope**
-  - Stable service-like names often represent long-lived interfaces.
-  - Random/GUID-like names often indicate ephemeral broker channels.
-  - Session scoping matters for multi-session systems; a pipe surface may be different per session/user.
+  - Stable, service-like names often represent long-lived interfaces.
+  - Random/GUID-like names often indicate ephemeral channels.
+  - Session scoping matters; the surface can differ per session/user.
 
 - **Operational state**
-  - Some pipes exist but will appear "busy" during the query window due to all instances being occupied.
-  - A correct mapper must represent this state explicitly.
+  - Pipes can exist while all instances are occupied during a query window.
+  - A mapper should represent this explicitly rather than silently dropping results.
 
 ---
 
 #### Common failure modes (design-level)
-Common high-value failure patterns seen in real-world LPEs and broker escapes:
+
+High-signal failure patterns seen in LPEs and broker escapes include:
 
 - **Overly permissive DACL**: low-trust callers can reach a privileged endpoint.
 - **Confused deputy**:
-  - Server impersonates client and performs privileged actions incorrectly, or
+  - Server impersonates the client and performs privileged actions incorrectly, or
   - Server does not impersonate when it should, and treats requests as trusted.
 - **Authorization not bound to identity**:
-  - Server authenticates but does not authorize per-operation.
-  - Identity is checked once but not tied to the requested action or object.
+  - Server authenticates but does not authorize per operation.
+  - Identity is checked once but not tied to the requested action/object.
 - **Untrusted path/object handling**:
   - Client-controlled filesystem paths, registry paths, object names used without canonicalization.
-  - TOCTOU when validation and use occur in different contexts or with different path interpretations.
+  - TOCTOU when validation and use occur under different contexts or interpretations.
 - **Protocol parsing mistakes**:
   - Length/format confusion, missing bounds checks, inconsistent framing across versions.
 - **Instance/lifetime handling**:
-  - Race windows, denial-of-service, or state confusion triggered by repeated connects/disconnects.
+  - Race windows, denial-of-service, or state confusion triggered by connect/disconnect patterns.
 
-**Named pipes are one of the most common roots of confused-deputy LPEs.**
+Named pipes are a common root of confused-deputy LPEs because they frequently bridge low-trust reachability to high-authority execution.
 
 ---
 
@@ -194,73 +205,67 @@ Common high-value failure patterns seen in real-world LPEs and broker escapes:
 
 This section documents the current strategy implemented in WTBM to extract **named pipes associated with high-authority processes** and to enrich them with **stable identifiers** and **security metadata**.
 
-The approach is intentionally low-level and handle-centric. It is designed for research correctness on live Windows systems, where race conditions, protected processes, and kernel edge cases are expected and must be handled explicitly.
+The approach is handle-centric and is meant to work on live systems. It is explicit about failure modes: access denied, protected processes, transient objects, and blocking object queries are treated as normal conditions that must be handled.
 
 ---
 
 ##### Rationale: process-attributed inventory
 
-WTBM is not interested in producing a global list of visible pipes under `\\.\pipe\*`.
-The primary research question is instead:
+WTBM is not trying to produce a global list under `\\.\pipe\*`. The primary question is:
 
-> Which IPC endpoints are actually associated with a specific high-authority process at runtime?
+> Which IPC endpoints are associated with a specific high-authority process at runtime?
 
-To answer this, the extractor starts from the process and works outward through its handle table, rather than starting from the global pipe namespace.
-
-This design choice allows later correlation rules to reason about **trust boundaries** in terms of concrete process-to-endpoint relationships.
+To answer this, WTBM starts from the process and works outward through its handle table. This design is important for later correlation rules, because it gives you a concrete process-to-endpoint relationship rather than a global namespace snapshot.
 
 ---
 
 ##### Privilege model
 
-The extractor attempts to enable `SeDebugPrivilege` at initialization time in order to:
+The extractor attempts to enable `SeDebugPrivilege` at initialization time to improve visibility when duplicating and inspecting handles from other processes.
 
-- duplicate handles from other processes,
-- inspect metadata of objects owned by higher-privilege processes.
-
-This step reduces avoidable access failures but does not guarantee full visibility (e.g. protected or PPL processes may still restrict access).
+This reduces avoidable failures but does not guarantee full visibility (e.g., protected processes or PPL constraints).
 
 ---
 
 ##### High-level extraction pipeline
 
-For each target process ID, the extractor performs the following steps:
+For each target PID, the extractor:
 
-1. Enumerate all system handles and filter by the target PID.
-2. Keep only handles whose object type is `File`.
-3. Duplicate each candidate handle into the current process.
-4. Apply conservative access-mask and attribute filters.
-5. Resolve the kernel object name with a strict timeout.
-6. Identify named pipe objects via the NT namespace.
-7. Build stable pipe identifiers (NT path and Win32 path).
-8. Retrieve the security descriptor **by handle**.
-9. Deduplicate and merge results per pipe.
+1. Enumerates all system handles and filters by the target PID.
+2. Keeps only handles whose object type is `File`.
+3. Duplicates each candidate handle into the current process.
+4. Applies conservative access-mask and attribute filters.
+5. Resolves the kernel object name with a strict timeout.
+6. Classifies named pipe objects via the NT namespace (`\Device\NamedPipe\`).
+7. Builds stable identifiers (NT path and Win32 path).
+8. Retrieves the security descriptor **by handle**.
+9. Deduplicates and merges results per pipe.
 
-The final output is a sorted list of `NamedPipeEndpoint` objects keyed by the pipe NT path.
+The output is a sorted list of `NamedPipeEndpoint` values keyed by the pipe NT path.
 
 ---
 
 ##### Handle enumeration and initial filtering
 
-WTBM uses a system-wide handle snapshot and restricts it to a specific process ID.
+WTBM uses a system-wide handle snapshot and restricts it to a specific PID.
 
-Only handles whose `ObjectType` is reported as `File` are considered. Named pipes are exposed as file objects at the handle level, so this filter removes the majority of unrelated handles early.
+Only handles whose reported `ObjectType` is `File` are considered. This matches how named pipes appear at the handle level and avoids spending time on unrelated object types.
 
 ---
 
 ##### Handle duplication
 
-To query object metadata safely from user space, each candidate handle is duplicated into the current process using `DuplicateHandle` with `DUPLICATE_SAME_ACCESS`.
+WTBM duplicates each candidate handle into the current process using `DuplicateHandle` with `DUPLICATE_SAME_ACCESS`.
 
-All subsequent queries (name and security) operate on the duplicated handle, not on the original remote handle.
+All subsequent queries (name and security) are performed on the duplicated handle. This keeps the logic local and avoids relying on remote handle operations.
 
 ---
 
 ##### Access-mask and attribute heuristics
 
-Not all file handles are equally useful or stable to query. The extractor applies a conservative heuristic:
+Not all file handles are equally useful or safe to query. WTBM applies a conservative heuristic:
 
-- at least one of the following access rights must be present:
+- require at least one of:
   - READ_CONTROL
   - SYNCHRONIZE
   - FILE_READ_DATA
@@ -269,31 +274,32 @@ Not all file handles are equally useful or stable to query. The extractor applie
 
 Additionally, handles flagged as `KernelHandle` or `ProtectClose` are skipped.
 
-These checks do not guarantee safety, but they significantly reduce the number of low-value or problematic handles queried downstream.
+These checks are heuristics: they reduce the volume of low-value handles, but they are not a proof of safety.
 
 ---
 
 ##### Object name resolution with bounded execution
 
-Resolving an object name via `NtQueryObject(ObjectNameInformation)` can block indefinitely for certain IPC endpoints, especially high-churn named pipes used by modern frameworks.
+Resolving an object name via `NtQueryObject(ObjectNameInformation)` can block indefinitely for a minority of handles on real systems (often due to timing and kernel edge cases on volatile IPC endpoints).
 
-To prevent a single pathological handle from stalling the entire extraction, WTBM resolves object names using a dedicated background thread with a fixed timeout.
+WTBM treats object name resolution as best-effort and enforces bounded execution:
 
-Key characteristics:
+- the name query runs on a dedicated background thread,
+- the caller waits a fixed time window (timeout),
+- if the timeout is exceeded, that `(pid, handle)` pair is cached and skipped for the remainder of the run.
 
-- The name query is allowed to run for a bounded time window.
-- If the timeout is exceeded, the handle is skipped.
-- A per-run cache tracks `(pid, handle)` pairs that have already timed out to avoid repeated stalls.
+Two outcomes are handled explicitly:
 
-If the query completes but returns an empty name, the handle is also skipped.
+- **Timeout**: skip and record that the handle is not observable within the configured budget.
+- **Empty name**: skip; the object cannot be mapped to a named pipe path.
 
-This design treats object name resolution as **best-effort** and explicitly prioritizes extractor stability.
+This design prevents a single pathological handle from stalling the entire extraction pass.
 
 ---
 
 ##### Named pipe identification via NT namespace
 
-After successful name resolution, a handle is classified as a named pipe only if its kernel path starts with:
+After successful name resolution, a handle is treated as a named pipe only if the kernel path starts with:
 
 ```
 \Device\NamedPipe\
@@ -305,43 +311,42 @@ This check is explicit and avoids misclassifying other file-backed objects or de
 
 ##### Stable pipe identity construction
 
-For each named pipe, the extractor builds a `NamedPipeRef` containing:
+For each named pipe, WTBM builds a `NamedPipeRef` that contains:
 
 - `NtPath`: the full kernel path (e.g. `\Device\NamedPipe\LOCAL\example`)
 - `Win32Path`: the corresponding Win32 path (`\\.\pipe\LOCAL\example`)
 - `Name`: a display-safe identifier used only for output and logging
 
-The relative pipe name is preserved **exactly** when constructing the Win32 path.
-Any normalization (such as replacing path separators) is limited to the display name to avoid generating non-existent pipe paths.
+The relative pipe name is preserved exactly when constructing the Win32 path. Any normalization (for display purposes) is confined to the display `Name` so the tool does not fabricate non-existent pipe names.
 
 ---
 
 ##### Security descriptor retrieval (by handle)
 
-Security metadata is retrieved using the duplicated handle, not the pipe name.
+WTBM retrieves security metadata using the duplicated handle rather than the pipe name.
 
-Querying security **by handle** avoids additional name-resolution paths and has proven more robust on volatile or short-lived IPC endpoints.
+Security-by-handle avoids additional name-resolution paths and is more robust in practice on volatile endpoints.
 
 The extractor records:
 
 - Owner SID
-- Owner account name (best-effort)
-- Full SDDL representation
+- Owner account name (best-effort resolution)
+- Full SDDL string
 
-If security retrieval fails, the error is stored alongside the pipe rather than silently discarding the endpoint.
+If security retrieval fails, the error is stored alongside the endpoint instead of silently discarding it. That preserves evidence for later triage and makes visibility limitations explicit.
 
 ---
 
 ##### Deduplication and merge strategy
 
-The stable identity of a pipe is its NT path.
+The stable identity of a pipe for mapping purposes is its NT path.
 
-When multiple handles reference the same pipe, results are merged using the following rule:
+If multiple handles refer to the same pipe, WTBM merges endpoints by:
 
-- prefer the instance with a complete and successfully retrieved security descriptor,
-- union tags and metadata where applicable.
+- preferring the instance with a complete security descriptor (no error and SDDL present),
+- combining tags and metadata.
 
-This avoids duplicate output while preserving the most informative observation.
+This reduces duplicate output while keeping the most informative observation.
 
 ---
 
@@ -351,85 +356,93 @@ This strategy provides:
 
 - process-attributed named pipe inventory for high-authority processes,
 - stable identifiers suitable for correlation rules,
-- bounded execution even in the presence of kernel edge cases.
+- bounded execution in the presence of kernel edge cases.
 
 It does not attempt to:
 
-- prove client reachability from lower integrity levels,
-- fully attribute server ownership beyond observed handle association.
+- prove client reachability from low/medium/AppContainer contexts,
+- fully attribute server ownership beyond “this process held a handle to the pipe object”.
 
-Those aspects are intentionally deferred to later analysis stages that consume the collected evidence.
+Those are deliberately deferred to later stages that consume this evidence.
 
 ---
 
 ##### Role in the overall research workflow
 
-This extraction layer is designed to produce high-fidelity evidence objects that later rules can analyze for trust-boundary exposure.
+This extraction layer exists to produce evidence objects that subsequent rules can analyze for trust-boundary exposure.
 
-By separating *collection* from *interpretation*, WTBM keeps the system understandable, auditable, and adaptable as the research evolves.
+Collection and interpretation are separated on purpose: the collector’s job is to gather reliable, structured observations; later logic decides which observations represent risk.
 
 ---
 
 ##### Vulnerability research workflow (how to use the extracted data)
 
 ###### Step 1: Triage for reachability
+
 Start with the DACL:
-- Identify principals representing low-trust callers (`Users`, `Authenticated Users`, `Everyone`, broad groups).
-- Look for overly broad allow ACEs on the pipe object.
+
+- Identify principals representing lower-trust callers (`Users`, `Authenticated Users`, `Everyone`, broad groups).
+- Look for broad allow ACEs on the pipe object.
 
 This is the fastest way to identify “unexpected caller can reach server”.
 
 ###### Step 2: Attribute the endpoint
+
 Use owner information and name patterns to form hypotheses:
-- Service/SYSTEM ownership → likely privileged server.
-- Stable naming → more likely long-lived interface worth deeper study.
-- Random naming → often ephemeral broker channel; may still be relevant but requires different collection tactics.
+
+- SYSTEM/service ownership often implies a privileged server.
+- Stable naming is more likely to represent a long-lived interface worth deeper study.
+- Random naming often indicates ephemeral broker channels; still relevant, but requires different collection tactics.
 
 ###### Step 3: Validate server behavior (beyond ACLs)
-ACL reachability is only one side. The core research questions are:
-- Does the server impersonate? At what level?
-- Is authorization checked per operation?
-- Are client-controlled paths/object names used safely?
-- Are privileged actions performed with correct identity binding?
 
-The pipe SD tells you who can talk. The vulnerability usually lies in what happens after the server accepts input.
+Reachability is only one side. The key questions are:
+
+- Does the server impersonate? Under what conditions?
+- Is authorization checked per operation?
+- Are client-controlled paths/object names handled safely?
+- Are privileged actions tied to identity and intent?
+
+ACLs tell you who can talk. Vulnerabilities often lie in what the server does after it accepts input.
 
 ###### Step 4: Feed tooling improvements back into collection
-If a high-value pipe is persistently busy:
-- increase retry window for that specific target,
-- run multi-pass sampling,
-- or schedule observation when the system is less active.
 
-For a research tool, it is better to report “busy, not observed” than to silently drop it.
+If a high-value pipe is persistently busy or intermittently observable:
+
+- increase retry window for that target,
+- run multi-pass sampling,
+- or observe during lower system activity.
+
+For a research tool, it is better to report “busy or not observed” than to silently drop endpoints.
 
 ---
 
 ##### Representing extraction outcomes explicitly
+
 For research correctness, the tool should not collapse all failures into “no data”.
 
 Each pipe should have an explicit extraction outcome, for example:
+
 - `Ok` – security descriptor retrieved and parsed
 - `Busy` – pipe exists but all instances were busy during the observation window
 - `Denied` – access denied under current token/privileges
 - `Error` – unexpected API or parsing failure
 
-Storing this state explicitly prevents misinterpretation and allows:
-- multi-pass aggregation,
-- privilege-context comparison,
-- accurate reporting of visibility gaps.
+Storing this state prevents misinterpretation and enables multi-pass aggregation, privilege-context comparison, and accurate reporting of visibility gaps.
 
 ---
 
 ##### Implementation notes (C# tool design)
+
 To keep the tool reliable and research-friendly:
 
 - Always store:
-  - pipe name, NT path and Win32 path,
+  - pipe name, NT path, and Win32 path,
   - owner SID + resolved name,
   - SDDL,
-  - parsed DACL ACE list (and keep raw access mask),
+  - parsed DACL ACE list (keep raw access mask),
   - MIL if available,
-  - query status (`ok`, `busy`, `denied`, `error`) + raw code and message.
+  - query status (`ok`, `busy`, `denied`, `error`) + raw code/message.
 
 - Implement bounded retries and make them configurable:
   - Win32: retries + `WaitNamedPipe` timeout
@@ -441,142 +454,155 @@ To keep the tool reliable and research-friendly:
   - where it failed (open vs query vs parse),
   - whether failure is `busy`, `denied`, or other.
 
-- Do not treat missing label as failure. It is commonly a privilege/visibility limitation.
+- Do not treat missing label data as failure. It is often a privilege/visibility limitation.
 
-**Named pipes are one of the most common roots of confused-deputy LPEs because they frequently bridge low-trust reachability to high-authority execution.**
+Named pipes are a common root of confused-deputy LPEs because they frequently bridge low-trust reachability to high-authority execution.
 
 ---
 
 ### 4.2 RPC (Remote Procedure Call)
 
 #### What it is
-RPC provides structured request/response IPC, heavily used by Windows itself.  
-It provides interface-based calls with marshalling, authentication, and multiple transports (often ALPC locally).
+
+RPC provides structured request/response IPC and is heavily used by Windows itself. It provides interface-based calls with marshalling, authentication, and multiple transports (often ALPC locally).
 
 #### Why it matters
-Many SYSTEM services and privileged helpers expose RPC endpoints.  
-RPC often represents the “official” call surface for privileged operations.
+
+Many SYSTEM services and privileged helpers expose RPC endpoints. RPC is frequently the “official” call surface for privileged operations.
 
 #### Security properties that matter
-- **Authentication level** (who is authenticated, and with what guarantees)
-- **Authorization checks per method** (not just endpoint-level)
-- **Identity binding between caller and request** (authorization must match actual caller)
-- **Marshalling/unmarshalling correctness** and structure complexity risk
-- **Legacy endpoints / compatibility paths** that keep weak semantics alive
+
+- Authentication level (who is authenticated, and with what guarantees)
+- Authorization checks per method (not just endpoint-level)
+- Identity binding between caller and request (authorization must match caller)
+- Marshalling/unmarshalling correctness and structure complexity risk
+- Legacy endpoints / compatibility paths that keep weaker semantics alive
 
 #### Common failure modes
+
 - Methods callable without adequate authorization
-- Incorrect assumptions about caller identity (or caller identity persistence across calls)
+- Incorrect assumptions about caller identity (or identity persistence across calls)
 - Parameter smuggling through optional/nested structures
 - Legacy endpoints with overly broad access
 - “Authenticated” treated as “authorized”
-- Dangerous privileged actions reachable through innocuous-looking methods
+- Dangerous privileged actions reachable through benign-looking methods
 
-RPC vulnerabilities often look benign in code, but catastrophic in effect.
+RPC issues often look routine in code and severe in effect.
 
 ---
 
 ### 4.3 COM / DCOM
 
 #### What it is
-COM is an object activation and invocation system built on top of RPC.  
-It supports:
+
+COM is an object activation and invocation system built on top of RPC. It supports:
+
 - in-proc servers (DLL),
 - out-of-proc servers (EXE),
 - service-hosted COM servers,
-and relies heavily on registry configuration.
+
+and it relies heavily on registry configuration.
 
 #### Why it matters
-Many brokers and automation components are COM servers.  
-COM therefore frequently forms a **cross-integrity or cross-UAC boundary**, especially in desktop software and enterprise environments.
+
+Many brokers and automation components are COM servers. COM frequently forms cross-integrity or cross-UAC boundaries, especially in desktop software and enterprise environments.
 
 #### Security properties that matter
-- **Launch and access permissions**
-- **Server identity** (user, elevated, SYSTEM)
-- **Activation model** (in-proc vs out-of-proc; affects isolation and trust)
-- **Registry-based configuration** (security descriptors and class registration)
-- **Caller identity semantics** (what identity the server sees, and how it uses it)
+
+- Launch and access permissions
+- Server identity (user, elevated, SYSTEM)
+- Activation model (in-proc vs out-of-proc; affects isolation and trust)
+- Registry-based configuration (security descriptors and class registration)
+- Caller identity semantics (what identity the server sees, and how it uses it)
 
 #### Common failure modes
+
 - Privileged COM servers callable by low-trust callers
 - Misconfigured activation permissions (too broad)
 - Incorrect trust assumptions in broker-like COM servers
 - “Same user” treated as “same trust” (ignores IL/UAC boundaries)
 - Registry-based configuration misuse leading to redirection/hijack behaviors
 
-COM-related issues are often **design** bugs rather than implementation bugs.
+COM issues are often design bugs rather than implementation bugs.
 
 ---
 
 ### 4.4 Shared Memory / Sections
 
 #### What they are
-Memory regions mapped into multiple processes via section objects (file mappings).  
-Often used for performance-critical IPC and shared state.
+
+Memory regions mapped into multiple processes via section objects (file mappings). Often used for performance-critical IPC and shared state.
 
 #### Why they matter
+
 Used for performance-critical IPC in:
+
 - browsers
 - antivirus engines
 - graphics subsystems
 
-Shared memory becomes dangerous when:
-- a lower-trust process can write,
-- and a higher-trust process consumes that data as trusted input.
+Shared memory becomes dangerous when a lower-trust process can write and a higher-trust process consumes that data as trusted input.
 
 #### Security properties that matter
-- Who can write to the shared memory (DACL and handle inheritance)
-- How data is validated before use (structure integrity, bounds, invariants)
+
+- Who can write (DACL and handle inheritance)
+- Validation before use (structure integrity, bounds, invariants)
 - Lifetime and synchronization semantics (ownership, locking, versioning)
-- Concurrency assumptions (race behavior often becomes the bug)
+- Concurrency assumptions (race behavior becomes the bug)
 
 #### Common failure modes
+
 - Writable shared memory consumed as trusted input
 - Structure confusion or version mismatches
 - Race conditions amplified by shared state
-- Partial validation (only header checked, body trusted)
+- Partial validation (header checked, body trusted)
 - Shared-memory “signals” treated as authorization
 
-Shared memory is rarely the root cause alone, but often a force multiplier.
+Shared memory is rarely the root cause alone, but it often amplifies other failures.
 
 ---
 
 ### 4.5 UI-based IPC (Windows messages, UIPI)
 
 #### What it is
+
 GUI processes communicate via window messages and related UI mechanisms (handles, message loops, accessibility interactions).
 
 #### Why it matters
-Historically a rich attack surface (“shatter attacks”) where low-privilege senders could manipulate privileged GUI processes.
+
+Historically this was a rich attack surface (“shatter attacks”) where low-privilege senders could manipulate privileged GUI processes.
 
 #### Modern constraints
+
 - Mandatory Integrity Control (MIC)
 - User Interface Privilege Isolation (UIPI)
 
-These mechanisms reduce cross-trust message flows significantly.
+These reduce cross-trust message flows significantly.
 
 #### Remaining risks
+
 - UIAccess tokens (deliberate bypass of UIPI constraints)
 - Allowed message types with unsafe handlers
-- Indirect UI-to-privileged execution flows (UI triggers privileged actions)
+- Indirect UI-to-privileged execution flows
 - Accessibility frameworks and privileged UI bridges
-- Legacy UI components that still assume “local UI = trusted”
+- Legacy UI components that assume “local UI = trusted”
 
-UI IPC is less common today, but still relevant in specific contexts.
+UI IPC is less common today but still relevant in specific contexts.
 
 ---
 
 ## 5. Indirect IPC and Delegation Channels
 
-Windows IPC is not limited to explicit transports (pipes/RPC/COM). Many real-world privilege boundaries are crossed through **indirect delegation channels**, where a lower-trust component influences a higher-trust component by writing state into a shared substrate.
+Windows IPC is not limited to explicit transports (pipes/RPC/COM). Many real-world boundaries are crossed through indirect delegation channels, where a lower-trust component influences a higher-trust component by writing state into a shared substrate.
 
-These channels are especially important in vulnerability research because they frequently produce:
-- **confused-deputy** conditions,
-- **canonicalization** mistakes,
-- **TOCTOU** races,
-- and **object squatting** attacks.
+These channels matter because they frequently produce:
 
-The key mental model is identical to classic IPC:
+- confused-deputy conditions,
+- canonicalization mistakes,
+- TOCTOU races,
+- object squatting attacks.
+
+The core model is the same as classic IPC:
 
 > A lower-trust actor supplies data; a higher-trust actor consumes it and performs privileged work.
 
@@ -585,28 +611,32 @@ The key mental model is identical to classic IPC:
 ### 5.1 Filesystem-based Handoff
 
 #### What it is
-Filesystem-based handoff happens when one component writes a file (or a path) and another component later reads, parses, moves, or executes it. This can be intentional (a staging directory) or accidental (a cache, temp file, or log file used as input).
 
-This is effectively IPC because the filesystem becomes the transport layer.
+Filesystem handoff occurs when one component writes a file (or a path) and another later reads, parses, moves, or executes it. This can be intentional (staging directory) or accidental (cache, temp artifacts, logs used as input).
+
+It functions as IPC because the filesystem is the transport.
 
 #### Why it matters for security
-Filesystem handoff is a high-value vulnerability class because it intersects directly with privileged operations:
+
+Filesystem handoff intersects directly with privileged operations:
+
 - writing into protected locations,
 - replacing binaries/configuration read by privileged services,
 - loading libraries/plugins,
-- updating software,
+- software updates,
 - scheduled tasks and helper executables.
 
-Even when the consumer process is not “exploited” in the classic sense, **unsafe file consumption** can yield privileged behavior.
+Even without a classic “exploit”, unsafe file consumption can yield privileged behavior.
 
 #### Common insecure patterns
+
 1) Writable staging locations used by higher-trust consumers  
-   Examples: `C:\Temp`, `%TEMP%`, `%LOCALAPPDATA%`, `%APPDATA%`, `%ProgramData%` (depending on permissions)
+   Examples: `C:\Temp`, `%TEMP%`, `%LOCALAPPDATA%`, `%APPDATA%`, `%ProgramData%` (permission-dependent)
 
 2) Path canonicalization mismatches  
    String form vs actual target mismatch (`\\?\`, short/long paths, UNC normalization)
 
-3) TOCTOU (Time-of-check to time-of-use)  
+3) TOCTOU (time-of-check to time-of-use)  
    Check happens before use; attacker switches target in the gap
 
 4) Reparse point / junction / symlink / mount point abuse  
@@ -616,93 +646,110 @@ Even when the consumer process is not “exploited” in the classic sense, **un
    Privileged writer overwrites protected file through attacker-controlled link
 
 6) Unsafe DLL/plugin loading from user-writable locations  
-   Plugin/search paths including user-writable folders; config-driven load without allowlisting
+   Search paths including user-writable folders; config-driven load without allowlisting
 
 #### Practical research workflow
-1) Identify all file inputs the high-trust component consumes (configs, caches, assets, update packages, plugins, temp artifacts)
+
+1) Identify all file inputs consumed (configs, caches, assets, update packages, plugins, temp artifacts)
 2) Determine origin: can a lower-trust process write them?
 3) Validate enforcement at use sites: canonicalize and re-check permissions
-4) Look for race windows: creation then privileged action is a classic TOCTOU structure
-5) Pay attention to token context: backup/restore semantics can bypass typical DACL expectations
+4) Look for race windows: creation then privileged action is a classic TOCTOU shape
+5) Pay attention to token context: backup/restore semantics can bypass DACL expectations
 
 #### How this maps to token/trust signals
-Filesystem handoff becomes especially interesting when the consumer runs with:
+
+Filesystem handoff is higher value when the consumer runs with:
+
 - High/System integrity
-- elevation semantics (`ElevationType=Full`)
+- elevation semantics (ElevationType=Full)
 - high-impact privileges (`SeBackupPrivilege`, `SeRestorePrivilege`, `SeTakeOwnershipPrivilege`, `SeManageVolumePrivilege`)
 - broker/service identity signals (SYSTEM/service accounts)
 
-These signals do not prove a bug, but sharply increase the value of investigating file-based inputs.
+These signals do not prove a bug, but they prioritize investigation.
 
 ---
 
 ### 5.2 Registry-based Handoff
 
 #### What it is
-Registry-based handoff occurs when a lower-trust component writes data to a registry key and a higher-trust component later reads and acts on it.
 
-This is common because the registry is globally accessible (within ACL constraints), persistent, and used heavily for configuration and activation.
+Registry handoff occurs when a lower-trust component writes data to a registry key and a higher-trust component later reads and acts on it.
+
+This is common because the registry is global (within ACL constraints), persistent, and heavily used for configuration and activation.
 
 #### Why it matters for security
+
 Registry handoffs frequently show up in:
+
 - COM activation and configuration
 - file/protocol handlers
 - per-user configuration consumed by elevated helpers
-- “recent file / last used path” state crossing trust boundaries
+- “recent file / last used path” state crossing boundaries
 
-Registry issues are often logic/design vulnerabilities, not memory-safety bugs.
+Registry issues are often logic/design failures.
 
 #### Common insecure patterns
-1) HKCU data trusted by elevated/System components (“same user” ≠ “same trust”)
-2) COM-related hijack primitives via mis-scoped write permissions
+
+1) HKCU data trusted by elevated/SYSTEM components (“same user” ≠ “same trust”)
+2) COM hijack primitives via mis-scoped write permissions
 3) Handler/shell integration misuse (open commands / protocol handlers)
 4) Policy/config injection (assumes registry is admin-only)
 5) Registry pointing to filesystem targets (registry + filesystem TOCTOU chains)
 
 #### Practical research workflow
-1) Identify keys/hives read by the target (HKLM vs HKCU matters; ACLs matter more)
+
+1) Identify keys/hives read (HKLM vs HKCU; ACLs matter more)
 2) Determine effective write access
 3) Track how values are used (paths, command lines, DLL names, CLSIDs, endpoints)
 4) Validate canonicalization and use-site re-validation
 
 #### How this maps to token/trust signals
-Registry handoff becomes high-value when you see:
+
+Registry handoff becomes high value when you see:
+
 - High/System IL processes that are interactive or broker-like
 - UAC boundary markers (elevation type, linked token)
 - COM usage likelihood
 - components acting on behalf of other processes
 
-Registry is often a control plane: writable control plane + privileged consumer = attack surface.
+Registry often acts as a control plane: writable control plane + privileged consumer = attack surface.
 
 ---
 
 ### 5.3 Named Object Namespace Abuse
 
 #### What it is
-Windows exposes a kernel object namespace used by IPC primitives and coordination:
+
+Windows exposes a kernel object namespace used by IPC and coordination:
+
 - Mutexes, Events, Semaphores
 - Section objects (shared memory)
 - Named pipes (as objects)
 - ALPC ports (advanced)
 
 Objects may exist in namespaces such as:
+
 - `Global\...`
 - `Local\...`
 - `\BaseNamedObjects\...`
 
 This becomes a delegation channel when a higher-trust process assumes:
+
 - a name is unique,
 - an existing object is trusted,
-- or DACLs are safe by default.
+- or default DACLs are safe.
 
 #### Why it matters for security
-Named objects frequently become boundary failures because:
+
+Named objects become boundary failures because:
+
 - names can be pre-created (“squatted”),
 - ACLs can be weak or misapplied,
 - global/session namespaces create unintended reachability,
 - synchronization/state objects are treated as authenticity signals.
 
 #### Common insecure patterns
+
 1) Object squatting / pre-creation  
    Attacker creates expected object before privileged component; privileged component opens attacker-controlled object.
 
@@ -713,19 +760,22 @@ Named objects frequently become boundary failures because:
    `Global\*` objects visible across sessions; assumptions about isolation break.
 
 4) Confused coordination between components  
-   Low-trust side controls synchronization or state consumed by high-trust side.
+   Low-trust side controls synchronization/state consumed by high-trust side.
 
 5) Shared memory poisoning  
    High-trust consumer reads shared memory as trusted and performs privileged work.
 
 #### Practical research workflow
+
 1) Identify named objects used by the target (runtime observation, strings, docs)
 2) Check create/open semantics and DACL correctness
 3) Assess namespace scope (Global vs session-local)
 4) Look for privileged follow-on actions driven by object state/data
 
 #### How this maps to token/trust signals
+
 This class becomes a strong hypothesis when:
+
 - high-trust processes coordinate with lower-trust peers (broker models),
 - session boundaries differ (services vs interactive),
 - shared memory/synchronization is likely,
@@ -741,13 +791,14 @@ Most IPC-related vulnerabilities are confused-deputy failures:
 - then performs privileged actions based on that input,
 - without correctly binding authorization to identity and intent.
 
-Common patterns:
+Common patterns include:
+
 - incorrect impersonation usage,
 - path traversal and TOCTOU issues,
 - identity vs privilege confusion (UAC),
 - “same user” treated as “same trust”.
 
-This is primarily a logic failure, not an IPC failure.
+This is primarily a logic failure, not an IPC mechanism failure.
 
 ---
 
@@ -759,55 +810,49 @@ Modern Windows security relies heavily on broker designs:
 2) Broker validates identity/capability and parameters
 3) Broker performs the operation with higher authority
 
-The broker is therefore the **true security boundary**.
-
-If broker validation fails, the sandbox fails.
+The broker is therefore the security boundary. If broker validation fails, the sandbox fails.
 
 ---
 
 ## 8. IPC enumeration in tooling (PTTBM perspective)
 
-A mapper tool cannot “solve IPC”, but it can build evidence.
+A mapper tool cannot “solve IPC”, but it can collect evidence.
 
 ### Feasible enrichment steps
+
 - Enumerate named pipe namespaces
 - Identify IPC-related modules (RPC/COM indicators)
 - Correlate processes by session, logon, and ancestry
 - Detect likely broker neighborhoods
 
 ### Advanced steps (future)
+
 - Map pipes to owning processes
 - Enumerate active RPC endpoints
 - Enumerate active COM servers
 - ETW-based runtime surface discovery
 
-Each step increases **confidence**, not certainty.
+Each step increases confidence, not certainty.
 
 ---
 
 ## 9. Confidence and visibility boundaries
 
 Without direct reachability validation:
+
 - IPC findings are hypotheses,
 - confidence must be explicit,
 - assumptions must be documented.
 
-This honesty is critical for research credibility.
+This matters for research credibility and for avoiding false conclusions from incomplete data.
 
 ---
 
 ## 10. Key takeaway
 
-IPC is where **authority meets reachability**.
+IPC is where authority meets reachability.
 
-- Tokens describe *what a process can do*
-- IPC determines *who can ask it to do it*
+- tokens describe what a process can do,
+- IPC determines who can ask it to do it.
 
-Most Windows vulnerabilities arise when higher-trust components act on lower-trust input across IPC boundaries without correct validation.
-
-Understanding IPC is therefore essential for:
-- sandbox escape research,
-- local privilege escalation research,
-- trust-boundary analysis.
-
-PTTBM treats IPC not as an implementation detail, but as the **core substrate of Windows security design**.
+Many vulnerabilities arise when higher-trust components act on lower-trust input across IPC boundaries without adequate validation and authorization.
