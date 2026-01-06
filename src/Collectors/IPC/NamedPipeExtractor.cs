@@ -17,6 +17,9 @@ namespace WTBM.Collectors.IPC
         private const string PipeRootWin32 = @"\\.\pipe\";
         private const string PipeRootNt = @"\Device\NamedPipe\";
 
+        private readonly HashSet<string> _nameQueryTimeouts = new(StringComparer.OrdinalIgnoreCase);
+
+
         public NamedPipeExtractor()
         {
             try
@@ -49,8 +52,15 @@ namespace WTBM.Collectors.IPC
                     if (!string.Equals(objectType, "File", StringComparison.OrdinalIgnoreCase))
                         continue;
 
+                    //if (String.IsNullOrEmpty(h.Name))
+                    //    continue;
+
+                    // Logger.LogDebug(String.Format("[PID:{0}] Retrieving named pipe: {1} ...", pid, h.Name));
+
                     var hProcess = Native.OpenProcess(Native.PROCESS_DUP_HANDLE, false, h.ProcessId);
                     var dupHandle = IntPtr.Zero;
+
+                    //Logger.LogDebug("DuplicateHandle");
 
                     bool ok = Native.DuplicateHandle(
                         hProcess,
@@ -62,12 +72,43 @@ namespace WTBM.Collectors.IPC
                         Native.DUPLICATE_SAME_ACCESS
                     );
 
+                    //Logger.LogDebug("DuplicateHandle - END");
+
                     if (!ok)
                     {
                         continue;
                     }
 
-                    string fullPath = NtQuery.GetObjectName(dupHandle);
+                    if (!Win32Security.HasAny(h.GrantedAccess.Access,
+                        Win32Security.READ_CONTROL |
+                        Win32Security.SYNCHRONIZE |
+                        Win32Security.FILE_READ_DATA |
+                        Win32Security.FILE_READ_ATTRIBUTES |
+                        FILE_READ_EA))
+                        continue;
+
+                    if (h.Attributes == AttributeFlags.ProtectClose ||
+                        h.Attributes == AttributeFlags.KernelHandle)
+                        continue;
+
+                    Logger.LogDebug(String.Format("[PID:{0}] Named pipe|Name={1} | ProcessName={2} | Attributes={3} ...", pid, h.Name, h.ProcessName, h.Attributes));
+                    
+                    var taskKey = $"{pid}:{h.Handle:X}";
+                    if (_nameQueryTimeouts.Contains(taskKey))
+                        continue;
+
+                    if (!TryGetObjectNameWithTimeout(dupHandle, 100, out var fullPath))
+                    {
+                        _nameQueryTimeouts.Add(taskKey);
+                        Logger.LogDebug($"[PID:{pid}] ObjectName query TIMEOUT | Handle={h.Handle} | Type={h.ObjectType} | Proc={h.ProcessName}");
+                        continue;
+                    }
+
+                    if (string.IsNullOrEmpty(fullPath))
+                        continue;
+
+                    //string fullPath = NtQuery.GetObjectName(dupHandle);
+                    Logger.LogDebug(String.Format("[PID:{0}] Named pipe|FullPath: {1} ...", pid, fullPath));
 
                     if (string.IsNullOrEmpty(fullPath))
                         continue;
@@ -76,13 +117,17 @@ namespace WTBM.Collectors.IPC
                         continue;
 
                     var namedPipeRef = getNamedPipeRef(fullPath);
-                    Logger.LogDebug(String.Format("[PID:{0}] NtPath={1} | Win32Path={2}", pid, namedPipeRef.NtPath, namedPipeRef.Win32Path));
+                    // Logger.LogDebug(String.Format("[PID:{0}] Named pipe|NtPath={1} | Win32Path={2}", pid, namedPipeRef.NtPath, namedPipeRef.Win32Path));
 
                     NamedPipeSecurityInfo npsi = null;
                     
                     try
                     {
-                        var sd = Win32Security.GetSecurityDescriptor(namedPipeRef.Win32Path);
+                        // var sd = Win32Security.GetSecurityDescriptor(namedPipeRef.Win32Path);
+                        //Logger.LogDebug($"[PID:{pid}] SD query START | {namedPipeRef.Win32Path}");
+                        var sd = Win32Security.GetSecurityDescriptorByHandle(dupHandle);
+                        //Logger.LogDebug($"[PID:{pid}] SD query END   | {namedPipeRef.Win32Path}");
+
                         npsi = new NamedPipeSecurityInfo
                         {
                             OwnerName = sd.OwnerName,
@@ -97,7 +142,6 @@ namespace WTBM.Collectors.IPC
                             Error = ex.Message
                         };
                     }
-                    
 
                     var endpoint = new NamedPipeEndpoint
                     {
@@ -164,7 +208,7 @@ namespace WTBM.Collectors.IPC
                     }
                     else
                     {
-                        Logger.LogDebug(String.Format("[PID:{0}] Error", ex.ToString()));
+                        Logger.LogDebug(String.Format("[PID:{0}] {1}", pid, ex.ToString()));
                         return map.Values
                             .OrderBy(e => e.Pipe.NtPath, StringComparer.OrdinalIgnoreCase)
                             .ToArray();
@@ -175,6 +219,32 @@ namespace WTBM.Collectors.IPC
             return map.Values
                 .OrderBy(e => e.Pipe.NtPath, StringComparer.OrdinalIgnoreCase)
                 .ToArray();
+        }
+
+        private bool TryGetObjectNameWithTimeout(IntPtr dupHandle, int timeoutMs, out string? fullPath)
+        {
+            fullPath = null;
+
+            string? local = null;
+            Exception? ex = null;
+
+            var t = new Thread(() =>
+            {
+                try { local = NtQuery.GetObjectName(dupHandle); }
+                catch (Exception e) { ex = e; }
+            })
+            { IsBackground = true, Name = "WTBM-ObjName" };
+
+            t.Start();
+
+            if (!t.Join(timeoutMs))
+                return false; // timed out
+
+            if (ex != null)
+                return true;  // call returned but failed; treat as "no name" and continue
+
+            fullPath = local;
+            return true;
         }
 
         private static NamedPipeEndpoint MergePreferMoreComplete(NamedPipeEndpoint a, NamedPipeEndpoint b)
